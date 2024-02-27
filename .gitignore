@@ -1,3 +1,6 @@
+# fragment files are too big
+data/**/fragments
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
