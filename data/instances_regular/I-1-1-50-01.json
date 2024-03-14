@@ -31,30 +31,10 @@
         },
         {
             "entrance": [
-                399,
-                364
-            ],
-            "id": 2,
-            "capacity": null,
-            "location": null,
-            "type": "workstation"
-        },
-        {
-            "entrance": [
                 1000,
                 500
             ],
-            "id": 3,
-            "capacity": null,
-            "location": null,
-            "type": "workstation"
-        },
-        {
-            "entrance": [
-                585,
-                935
-            ],
-            "id": 4,
+            "id": 2,
             "capacity": null,
             "location": null,
             "type": "workstation"
@@ -66,8 +46,8 @@
             "start_time": 10,
             "end_time": 59,
             "charge": 70,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 20,
                 194
@@ -82,8 +62,8 @@
             "start_time": 20,
             "end_time": 42,
             "charge": 30,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 23,
                 97
@@ -98,8 +78,8 @@
             "start_time": 21,
             "end_time": 69,
             "charge": 44,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 110,
                 135
@@ -114,8 +94,8 @@
             "start_time": 22,
             "end_time": 68,
             "charge": 42,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 39,
                 171
@@ -130,8 +110,8 @@
             "start_time": 28,
             "end_time": 75,
             "charge": 44,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 177,
                 40
@@ -146,8 +126,8 @@
             "start_time": 37,
             "end_time": 65,
             "charge": 39,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 97,
                 109
@@ -162,8 +142,8 @@
             "start_time": 39,
             "end_time": 86,
             "charge": 45,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 121,
                 64
@@ -178,8 +158,8 @@
             "start_time": 49,
             "end_time": 70,
             "charge": 25,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 198,
                 165
@@ -194,8 +174,8 @@
             "start_time": 49,
             "end_time": 86,
             "charge": 38,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 127,
                 56
@@ -210,8 +190,8 @@
             "start_time": 52,
             "end_time": 92,
             "charge": 42,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 130,
                 178
@@ -226,8 +206,8 @@
             "start_time": 60,
             "end_time": 94,
             "charge": 48,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 178,
                 72
@@ -242,8 +222,8 @@
             "start_time": 67,
             "end_time": 98,
             "charge": 41,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 121,
                 64
@@ -258,8 +238,8 @@
             "start_time": 68,
             "end_time": 89,
             "charge": 21,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 27,
                 19
@@ -274,8 +254,8 @@
             "start_time": 74,
             "end_time": 121,
             "charge": 42,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 20,
                 194
@@ -290,8 +270,8 @@
             "start_time": 76,
             "end_time": 106,
             "charge": 37,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 27,
                 19
@@ -306,8 +286,8 @@
             "start_time": 84,
             "end_time": 111,
             "charge": 31,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 84,
                 169
@@ -322,8 +302,8 @@
             "start_time": 92,
             "end_time": 142,
             "charge": 61,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 130,
                 178
@@ -338,8 +318,8 @@
             "start_time": 101,
             "end_time": 132,
             "charge": 30,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 85,
                 185
@@ -354,8 +334,8 @@
             "start_time": 102,
             "end_time": 142,
             "charge": 44,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 198,
                 165
@@ -370,8 +350,8 @@
             "start_time": 112,
             "end_time": 160,
             "charge": 59,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 121,
                 64
@@ -386,8 +366,8 @@
             "start_time": 121,
             "end_time": 166,
             "charge": 51,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 20,
                 194
@@ -402,8 +382,8 @@
             "start_time": 129,
             "end_time": 172,
             "charge": 60,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 27,
                 19
@@ -418,8 +398,8 @@
             "start_time": 130,
             "end_time": 155,
             "charge": 30,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 23,
                 97
@@ -434,8 +414,8 @@
             "start_time": 130,
             "end_time": 160,
             "charge": 27,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 177,
                 40
@@ -450,8 +430,8 @@
             "start_time": 136,
             "end_time": 157,
             "charge": 26,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 84,
                 169
@@ -466,8 +446,8 @@
             "start_time": 145,
             "end_time": 169,
             "charge": 22,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 198,
                 165
@@ -482,8 +462,8 @@
             "start_time": 149,
             "end_time": 172,
             "charge": 31,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 84,
                 169
@@ -498,8 +478,8 @@
             "start_time": 158,
             "end_time": 196,
             "charge": 55,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 84,
                 169
@@ -514,8 +494,8 @@
             "start_time": 168,
             "end_time": 194,
             "charge": 24,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 104,
                 20
@@ -530,8 +510,8 @@
             "start_time": 169,
             "end_time": 206,
             "charge": 44,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 186,
                 164
@@ -546,8 +526,8 @@
             "start_time": 179,
             "end_time": 205,
             "charge": 32,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 53,
                 191
@@ -562,8 +542,8 @@
             "start_time": 184,
             "end_time": 229,
             "charge": 59,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 130,
                 178
@@ -578,8 +558,8 @@
             "start_time": 191,
             "end_time": 239,
             "charge": 60,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 179,
                 36
@@ -594,8 +574,8 @@
             "start_time": 199,
             "end_time": 224,
             "charge": 29,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 186,
                 164
@@ -610,8 +590,8 @@
             "start_time": 209,
             "end_time": 235,
             "charge": 32,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 53,
                 191
@@ -626,8 +606,8 @@
             "start_time": 212,
             "end_time": 259,
             "charge": 45,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 121,
                 64
@@ -642,8 +622,8 @@
             "start_time": 222,
             "end_time": 260,
             "charge": 37,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 180,
                 107
@@ -658,8 +638,8 @@
             "start_time": 222,
             "end_time": 267,
             "charge": 42,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 177,
                 40
@@ -674,8 +654,8 @@
             "start_time": 229,
             "end_time": 276,
             "charge": 63,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 20,
                 194
@@ -690,8 +670,8 @@
             "start_time": 237,
             "end_time": 278,
             "charge": 61,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 183,
                 33
@@ -706,8 +686,8 @@
             "start_time": 247,
             "end_time": 280,
             "charge": 30,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 23,
                 97
@@ -722,8 +702,8 @@
             "start_time": 254,
             "end_time": 300,
             "charge": 68,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 105,
                 73
@@ -738,8 +718,8 @@
             "start_time": 261,
             "end_time": 295,
             "charge": 50,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 177,
                 5
@@ -754,8 +734,8 @@
             "start_time": 266,
             "end_time": 287,
             "charge": 30,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 127,
                 56
@@ -770,8 +750,8 @@
             "start_time": 275,
             "end_time": 305,
             "charge": 35,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 92,
                 58
@@ -786,8 +766,8 @@
             "start_time": 275,
             "end_time": 311,
             "charge": 51,
-            "building_start_id": 4,
-            "building_end_id": 3,
+            "building_start_id": 0,
+            "building_end_id": 2,
             "start_location": [
                 183,
                 33
@@ -802,8 +782,8 @@
             "start_time": 282,
             "end_time": 321,
             "charge": 58,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 105,
                 73
@@ -818,8 +798,8 @@
             "start_time": 288,
             "end_time": 332,
             "charge": 54,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 31,
                 128
@@ -834,8 +814,8 @@
             "start_time": 297,
             "end_time": 322,
             "charge": 28,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 105,
                 73
@@ -850,8 +830,8 @@
             "start_time": 305,
             "end_time": 344,
             "charge": 42,
-            "building_start_id": 2,
-            "building_end_id": 3,
+            "building_start_id": 1,
+            "building_end_id": 2,
             "start_location": [
                 186,
                 164
