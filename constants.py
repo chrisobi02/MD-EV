@@ -25,6 +25,11 @@ class Flow(Enum):
 class TimedDepot:
     time: int
     id: int
+    
+    @property
+    def route_str(self):
+        return f"D{self.id}"
+
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,9 @@ class Job:
     building_end_id: int
     start_location: tuple
     end_location: tuple
+    @property
+    def route_str(self):
+        return f"{self.id}"
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,10 @@ class Building:
     capacity: int = None
     location: tuple = None  # Only applies to depots
 
+    @property
+    def route_str(self):
+        return f"D{self.id}"
+
 
 @dataclass(frozen=True)
 class Fragment:
@@ -56,20 +68,11 @@ class Fragment:
     end_time: int
     start_depot_id: int
     end_depot_id: int
+    charge: int
 
-    def is_departure(self, timed_depot: TimedDepot) -> bool:
-        """
-        Determines if a given fragment is an arrival or a departure from the timed node
-        Conditions:
-        - start_depot_id must match
-        - The end time must be less than the timed_depot's time (if it is larger, then it could be an end time)
-        """
-        # if fragment.start_time > timed_depot.time:
-        #     print(f"fragment is ")
-
-        return (
-            self.start_depot_id == timed_depot.id and self.end_time < timed_depot.time
-        )
+    @property
+    def route_str(self):
+        return "->".join([str(j.id) for j in self.jobs])
 
     @property
     def verbose_str(self):

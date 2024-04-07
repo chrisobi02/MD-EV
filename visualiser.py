@@ -50,7 +50,7 @@ def visualise_timed_network(
     vehicle_arcs: list[tuple[TimedDepot, TimedDepot]],
     waiting_arcs: list[dict[str, int | tuple[TimedDepot, TimedDepot]]],
     **kwargs
-) -> None:
+) -> go.Figure:
     fig = go.Figure()
     graph_arc_x = []
     graph_arc_y = []
@@ -100,15 +100,15 @@ def visualise_timed_network(
         waiting_arc_x.extend([start.time, end.time, None])
         waiting_arc_y.extend([start.id, end.id, None])
         
-        # annotate the flow
-        fig.add_annotation(
-            x=(end.time + start.time) / 2,
-            y=(end.id + start.id) / 2,
-            text=arc["flow"],
-            showarrow=True,
-            arrowhead=1,
-            arrowcolor="black",
-        )
+        # # annotate the flow
+        # fig.add_annotation(
+        #     x=(end.time + start.time) / 2,
+        #     y=(end.id + start.id) / 2,
+        #     # text=arc.get("flow", None),
+        #     showarrow=True,
+        #     arrowhead=1,
+        #     arrowcolor="black",
+        # )
 
     fig.add_trace(
         go.Scatter(
@@ -131,133 +131,47 @@ def visualise_timed_network(
     )
     # Add a title
     fig.update_layout(title_text=f"Timed Network for {kwargs.get('instance_label', '##')}, type: {kwargs.get('charge_type', 'N/A')}")
-    fig.show()
+    # fig.show()
 
-
+    return fig
     pass
-# def visualise_timed_network(
-#     timed_nodes_by_depot: dict[int, list[TimedDepot]],
-#     fragments: set[Fragment],
-#     waiting_arcs: set[tuple[TimedDepot, TimedDepot]],
-#     fragments_by_timed_node: tuple[TimedDepot, TimedDepot],
-# ) -> None:
-#     nodes = set()
-#     node_id_lookup = {}
-#     idx = 0
-#     for t in timed_nodes_by_depot:
-#         for n in timed_nodes_by_depot[t]:
-#             nodes.add((idx, (n.time, n.id)))
-#             node_id_lookup[n] = idx
-#             idx += 1
 
-#     arcs = set()
-#     for f in fragments:
-#         start_fragment = TimedFragment(
-#             time=f.start_time, id=f.id, direction=Flow.DEPARTURE
-#         )
-#         end_fragment = TimedFragment(time=f.end_time, id=f.id, direction=Flow.ARRIVAL)
-#         for td in timed_nodes_by_depot[f.start_depot_id]:
-#             if start_fragment in fragments_by_timed_node[td]:
-#                 start_node = td
-#                 break
-#         else:
-#             raise ValueError(
-#                 f"fragment {f.start_time, f.start_depot_id} not found in start timed nodes"
-#             )
+def visualise_routes(
+        routes: list[TimedDepot | tuple[TimedDepot, TimedDepot]], 
+        timed_depots: list[TimedDepot],
+    ) -> go.Figure:
+    fig = go.Figure()
+    # Choose len(routes) colors from the color palette
+    colors = px.colors.qualitative.Alphabet
 
-#         for td in timed_nodes_by_depot[f.end_depot_id]:
-#             if end_fragment in fragments_by_timed_node[td]:
-#                 end_node = td
-#                 break
-#         else:
-#             raise ValueError(
-#                 f"fragment {f.start_time, f.start_depot_id} not found in end timed nodes"
-#             )
+    for i, route in enumerate(routes):
+        route = [td for td in route if isinstance(td, TimedDepot)]
+        # timed_depots = [td for td in routes if isinstance(td, TimedDepot)]
+        # vehicle_arcs = [td for td in routes if isinstance(td, tuple)]
+        route_path_x = [td.time for td in route]
+        route_path_y = [td.id for td in route]
+        fig.add_trace(
+            go.Scatter(
+                x=route_path_x,
+                y=route_path_y,
+                mode="lines+markers",
+                marker=dict(size=10, color="blue"),
+                line=dict(width=0.5, color=colors[i]),
+                name=f"Route {i}",
+            )
+        )
 
-#         arcs.add((node_id_lookup[start_node], node_id_lookup[end_node]))
-
-#     vehicle_arc_ids = [(a[0], a[1]) for a in arcs]
-#     waiting_arc_with_weight_ids = [
-#         (node_id_lookup[a[0]], node_id_lookup[a[1]], a[2]) for a in waiting_arcs
-#     ]
-#     waiting_arc_ids = [
-#         (node_id_lookup[a[0]], node_id_lookup[a[1]]) for a in waiting_arcs
-#     ]
-#     g = nx.DiGraph()
-#     g.add_nodes_from((id, {"pos": pos}) for id, pos in nodes)
-
-#     # vehicle_nodes = set(i for arc in vehicle_arc_ids for i in arc)
-#     # drone_nodes = set(i for arc in waiting_arcs for i in arc)
-#     # unvisited = set(g.nodes) - vehicle_nodes - drone_nodes
-
-#     mpl.rcParams["savefig.bbox"] = "tight"
-#     pos = nx.get_node_attributes(g, "pos")
-#     fig = plt.figure()
-#     cmap = mpl.colormaps["tab20c"]
-#     tc = 1
-#     dc = 9
-#     uc = 17
-#     ns = 15
-#     ax = plt.subplot(111)
-#     # nodes_noid = set(i for arc in nodes for i in arc)
-#     # Drone, Truck, and unvisited nodes
-#     g.add_edges_from(
-#         (
-#             (
-#                 i,
-#                 j,
-#             )
-#             for i, j in arcs
-#         )
-#     )
-#     for i, j, weight in waiting_arc_with_weight_ids:
-#         g.add_edge(i, j, weight=weight)
-
-#     nx.draw_networkx_nodes(
-#         g,
-#         pos,
-#         g.nodes,
-#         ax=ax,
-#         node_color=[cmap(dc)],
-#         edgecolors=[cmap(dc - 1)],
-#         node_size=ns,
-#         label="Timed Depots",
-#     )
-
-#     edge_labels = nx.get_edge_attributes(g, "weight")
-#     nx.draw_networkx_edge_labels(g, pos, edge_labels=edge_labels)
-
-#     nx.draw_networkx_edges(
-#         g,
-#         pos,
-#         vehicle_arc_ids,
-#         ax=ax,
-#         edge_color=[cmap(tc - 1)],
-#         label="Vehicle fragments",
-#         width=0.5,
-#         connectionstyle="arc3, rad = 0.1",
-#     )
-#     nx.draw_networkx_edges(
-#         g,
-#         pos,
-#         waiting_arc_ids,
-#         ax=ax,
-#         edge_color=[cmap(dc - 1)],
-#         label="Waiting arcs",
-#         width=0.5,
-#     )
-#     # ax.axis("off")
-#     nx.draw(
-#         g,
-#         pos,
-#         with_labels=True,
-#     )
-
-#     box = ax.get_position()
-#     ax.set_position([box.x0, box.y0 + box.height * 0.1, box.width, box.height * 0.9])
-#     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.05), ncol=3)
-#     plt.show()
-
+    fig.add_trace(
+        go.Scatter(
+            x=[t.time for t in timed_depots],
+            y=[t.id for t in timed_depots],
+            mode="markers",
+            marker=dict(size=10, color="green"),
+            name="Timed Depots",
+        )
+    )
+    
+    return fig
 
 if __name__ == "__main__":
     data = json.load(open("data/instances_regular/I-1-1-50-01.json"))

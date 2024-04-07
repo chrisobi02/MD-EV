@@ -3,6 +3,29 @@
 Minimize
  
 Subject To
- job_0: = 1
+ flow_TimedDepot(time=177,_id=0): - 1
+   + w_TimedDepot(time=162,_id=0)_TimedDepot(time=177,_id=0)
+   - w_TimedDepot(time=177,_id=0)_TimedDepot(time=187,_id=0) = 0
+ set_sol_f_424: f_424 = 0
+ set_sol_f_366: f_366 = 0
+ set_sol_f_138: f_138 = 0
+ set_sol_f_446: f_446 = 0
+ set_sol_f_235: f_235 = 1
+ set_sol_f_330: f_330 = 0
+ set_sol_f_22: f_22 = 0
+ set_sol_f_58: f_58 = 0
+ set_sol_f_116: f_116 = 0
+ set_sol_(TimedDepot(time=162,_id=0),_TimedDepot(time=177,_id=0)):
+   w_TimedDepot(time=162,_id=0)_TimedDepot(time=177,_id=0) = 0
+ set_sol_(TimedDepot(time=177,_id=0),_TimedDepot(time=187,_id=0)):
+   w_TimedDepot(time=177,_id=0)_TimedDepot(time=187,_id=0) = 0
 Bounds
+ w_TimedDepot(time=162,_id=0)_TimedDepot(time=177,_id=0) free
+ w_TimedDepot(time=177,_id=0)_TimedDepot(time=187,_id=0) free
+Binaries
+ f_424 f_231 f_366 f_247 f_138 f_233 f_446 f_245 f_230 f_235 f_330 f_237
+ f_228 f_232 f_22 f_229 f_246 f_244 f_236 f_234 f_58 f_116
+Generals
+ w_TimedDepot(time=162,_id=0)_TimedDepot(time=177,_id=0)
+ w_TimedDepot(time=177,_id=0)_TimedDepot(time=187,_id=0)
 End
