@@ -31,7 +31,6 @@ class TimedDepot:
         return f"D{self.id}"
 
 
-
 @dataclass(frozen=True)
 class Job:
     id: int
@@ -102,3 +101,7 @@ class Route:
     end_depot_id: int
     start_time: int
     end_time: int
+@dataclass()
+class TimedDepotStore:
+    start: TimedDepot=None
+    end: TimedDepot=None

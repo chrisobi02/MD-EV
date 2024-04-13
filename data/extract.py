@@ -5,16 +5,19 @@ import ast
 
 INSTANCE_SHEETS = [
     "instances_constrained",
-    "instances_large",
+    # "instances_large",
     "instances_num_of_depots_experim",
     "instances_regular",
 ]
 
 
-def read_instances():
-    data: dict[str, pd.DataFrame] = pd.read_excel(
-        "data/mdevs_data.xlsx", sheet_name=INSTANCE_SHEETS
-    )
+def read_instances(large_instances=True):
+    if large_instances:
+        data = {"instances_large": pd.read_xml("data/instances_large.xml")}
+    else:
+        data: dict[str, pd.DataFrame] = pd.read_excel(
+            "data/mdevs_data.xlsx", sheet_name=INSTANCE_SHEETS
+        )
 
     for instance_type in data:
         path = f"data/{instance_type}"
@@ -23,7 +26,7 @@ def read_instances():
             print("deone")
             os.mkdir(path)
 
-        for i, instance in data[instance_type].iterrows():
+        for _, instance in data[instance_type].iterrows():
             json_data = {
                 "ID": instance["ID"],
                 "label": instance["label"],
@@ -159,4 +162,4 @@ def read_instances():
 
 
 if __name__ == "__main__":
-    read_instances()
+    read_instances(large_instances=True)

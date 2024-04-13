@@ -8,7 +8,7 @@ import pandas as pd
 from typing import TypeVar
 import glob
 from abc import ABC, abstractmethod
-import re
+from itertools import product
 from visualiser import visualise_timed_network, visualise_routes
 
 from constants import *
@@ -218,6 +218,11 @@ class BaseFragmentGenerator(ABC):
             )
 
     def solve(self):
+        # self.model.update()
+        # r = self.model.relax()
+        # r.optimize()
+        # r_remove_vars = [v for v in r.getVars() if v.rc > 0]
+        # print(len(r_remove_vars))
         self.model.optimize()
         if self.model.status == GRB.INFEASIBLE:
             self.model.computeIIS()
@@ -306,25 +311,27 @@ class BaseFragmentGenerator(ABC):
                 routes.append(route)
         return routes
 
-    def read_solution(self, instance_type:str=None) -> set[int]:
+    def read_solution(self, instance_type:str=None, sheet_name=None) -> tuple[list[list[int]], list[str]]:
         """Reads the solution given by the paper into a list of their routes which has waiting arcs and fragments."""
-        data = pd.read_excel(r"data/mdevs_solutions.xlsx", sheet_name=None)
-        for sheet in data:
-            if instance_type in sheet:
-                data = data[sheet]
-                break
+        data = pd.read_excel(r"data/mdevs_solutions.xlsx", sheet_name=sheet_name)
+        if not sheet_name:
+            for sheet in data:
+                if instance_type in sheet:
+                    data = data[sheet]
+                    break
 
         curr_sol_str = data.query(
             f"ID_instance == {self.data['ID']} and battery_charging == 'constant-time'"
         )["solution"].values[0]
+        curr_sol_str = "[D2>4>S105>16>S104>27>S104>40>S105>61>S104>77>S105>95>S104>D1],[D1>5>13>S104>38>S105>79>S104>D1],[D1>6>S106>17>S105>31>S104>53>S104>80>S104>D1],[D1>7>S105>25>S105>42>S104>57>S104>69>S104>85>96>S104>D1],[D1>8>S104>23>S105>36>S105>52>S104>70>S104>91>S104>D1],[D1>9>S104>21>S104>35>S104>58>S104>72>S106>93>S104>D1],[D1>10>S104>24>S104>39>S105>54>S106>71>S106>87>S105>100>S104>D1],[D1>11>S104>41>S104>60>S104>82>S104>97>S104>D1],[D1>12>S105>55>S105>84>S104>D1],[D1>14>S105>34>S104>47>S104>66>S105>89>S104>D1],[D1>15>S105>26>S105>37>S105>56>S105>67>S106>90>S105>101>S104>D1],[D1>18>S106>29>S105>45>S105>63>S105>86>S104>103>S104>D1],[D1>19>S105>32>S104>51>S105>75>S106>94>S104>D1],[D1>20>S105>33>S105>50>S104>68>S104>81>S106>99>S104>D1],[D1>22>S106>30>S104>49>S106>74>S104>D1],[D1>28>S104>44>S104>62>S105>76>S105>98>S104>D1],[D1>43>59>S106>73>88>S104>D1],[D2>46>64>S104>78>S104>92>S104>102>S104>D1],[D1>48>S105>65>S106>83>S104>D1]"
         solution_routes = []
         string_solution_routes=[]
         # Convert the matches to integers and find the maximum since sometimes there is a weird offset
         # job_offset = min(map(int, re.findall(r'>(\d+)>', curr_sol_str))) - 1
         num_depots = len(self.depots_by_id)
         num_jobs = len(self.jobs_by_id)
-        print(len(curr_sol_str.split(",")))
-        print(curr_sol_str)
+        # print(len(curr_sol_str.split(",")))
+        # print(curr_sol_str)
         for route in curr_sol_str.split(","):
             print(route)
             current_route = []
@@ -351,7 +358,7 @@ class BaseFragmentGenerator(ABC):
                 current_route = current_route[:-1]
 
             string_solution_routes.append(self.stringify_route(current_route))
-            print(string_solution_routes[-1])
+            # print(string_solution_routes[-1])
             route_fragment_ids = self.convert_route_to_fragments(current_route)
             solution_routes.append(route_fragment_ids)
 
@@ -361,7 +368,6 @@ class BaseFragmentGenerator(ABC):
     def convert_route_to_fragments(self, route: list) -> list[int]:
         """Converts a route into its fragments"""
         fragment_ids = []
-        prev_loc = None
         current_fragment = {
             "jobs": [],
             "start_depot_id": None,
@@ -427,15 +433,15 @@ class BaseFragmentGenerator(ABC):
                 # Check the following:
                 # min end time >= max start time
                 # no start time later than the current depot time and no earlier than the previous time.
-                start_fragments = [f for f in fragments if f.direction == Flow.DEPARTURE]
-                end_fragments = [f for f in fragments if f.direction == Flow.ARRIVAL]
-                if len(end_fragments) != 0:
-                    assert all(prev_td.time <= tf.time <= td.time for tf in start_fragments)
-                if len(start_fragments) != 0:
-                    assert all(prev_td.time <= tf.time <= td.time for tf in end_fragments)
-                if len(start_fragments) != 0 and len(end_fragments) != 0:
-                   max_arr = max(tf.time for tf in end_fragments) 
-                   min_dep = min(tf.time for tf in start_fragments)
+                departure_fragments = [f for f in fragments if f.direction == Flow.DEPARTURE]
+                arrival_fragments = [f for f in fragments if f.direction == Flow.ARRIVAL]
+                if len(arrival_fragments) != 0:
+                    assert all(prev_td.time <= tf.time <= td.time for tf in departure_fragments)
+                if len(departure_fragments) != 0:
+                    assert all(prev_td.time <= tf.time <= td.time for tf in arrival_fragments)
+                if len(departure_fragments) != 0 and len(arrival_fragments) != 0:
+                   max_arr = max(tf.time for tf in arrival_fragments) 
+                   min_dep = min(tf.time for tf in departure_fragments)
                    assert max_arr <= min_dep
                 prev_td=td
 
@@ -593,7 +599,7 @@ class BaseFragmentGenerator(ABC):
         """
     
     @abstractmethod
-    def _generate_fragment_starting_at(
+    def _generate_job_sequence_starting_at(
         self,
         fragment_set: set[Fragment],
         current_fragment: dict,
@@ -604,45 +610,6 @@ class BaseFragmentGenerator(ABC):
         """
         Generates a fragment starting at a given job and depot with a given charge at a given time.
         """
-        current_jobs: list[Job] = current_fragment["jobs"]
-        # Get all jobs which can be reached from the current job
-        # Add this partial part of the journey as a fragment.
-        for id, depot in self.depots_by_id.items():
-            if self.job_to_depot_charge_matrix[job.id][depot.id] <= charge:
-                finish_time = (
-                    job.end_time
-                    + self.job_to_depot_time_matrix[job.id][depot.id]
-                    + RECHARGE_TIME
-                )
-                fragment_set.add(
-                    Fragment(
-                        id=id_counter[0],
-                        jobs=tuple(current_jobs),
-                        start_time=current_fragment["start_time"],
-                        end_time=finish_time,
-                        start_depot_id=current_fragment["start_depot_id"],
-                        end_depot_id=depot.id,
-                        charge=current_fragment["charge"] + self.job_to_depot_charge_matrix[job.id][depot.id],
-                    )
-                )
-                id_counter[0] += 1
-
-        reachable_jobs = self.get_jobs_reachable_from(charge, job)
-        next_fragment = current_fragment.copy()
-        for next_job in reachable_jobs:
-            # manage memory
-            next_fragment["jobs"] = current_jobs.copy() + [next_job]
-            next_fragment["charge"] = charge + self.job_charge_matrix[job.id][next_job.id]
-            # Otherwise, generate a fragment starting at the next job
-            self._generate_fragment_starting_at(
-                fragment_set,
-                next_fragment,
-                next_job,
-                charge - self.job_charge_matrix[job.id][next_job.id],
-                id_counter,
-            )
-
-        return fragment_set
 
     @abstractmethod
     def write_fragments(self) -> None:
@@ -708,6 +675,14 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
         reachable_jobs = []
         t = job.end_time
         for next_job in self.jobs:
+            # 3.
+            charge_cost = next_job.charge + self.job_charge_matrix[job.id][next_job.id] + min(
+                self.job_to_depot_charge_matrix[next_job.id][depot.id]
+                for depot in self.depots_by_id.values()
+            )
+            if charge < charge_cost:
+                # Cannot reach job and recharge.
+                continue
             # 1
             arrival_time = t + self.job_time_matrix[job.id][next_job.id]
             if next_job.start_time < arrival_time:
@@ -725,14 +700,6 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
             if t + recharge_time <= next_job.start_time:
                 continue
 
-            charge_cost = self.job_charge_matrix[job.id][next_job.id] + min(
-                self.job_to_depot_charge_matrix[next_job.id][depot.id]
-                for depot in self.depots_by_id.values()
-            )
-            # 3.
-            if charge < charge_cost:
-                # Cannot reach job and recharge.
-                continue
 
             reachable_jobs.append(next_job)
         return reachable_jobs
@@ -777,86 +744,92 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
             except FileNotFoundError:
                 print(f"File {file} not found. Generating fragments...")
 
-        fragment_set: set[Fragment] = set()
-        id_counter = [0]
+        job_set: set[tuple[Job]] = set()
         time0 = time.time()
-        for depot_id, depot in self.depots_by_id.items():
+        # for depot_id, depot in self.depots_by_id.items():
             # starting job
-            for job in self.jobs:
-                charge = CHARGE_MAX - self.depot_to_job_charge_matrix[depot.id][job.id]
-                start_time = (
-                    job.start_time - self.depot_to_job_time_matrix[depot.id][job.id]
+        self.feasible_job_sequences = defaultdict(set)
+        for job in self.jobs:
+            # get the minimum depot to job time and charge (the same since charge is prop to time)
+            closest_depot = min(
+                self.depots_by_id.values(),
+                key=lambda depot: self.depot_to_job_time_matrix[depot.id][job.id],
+            )
+            charge = CHARGE_MAX - self.depot_to_job_charge_matrix[closest_depot.id][job.id] - job.charge
+            start_time = job.start_time - self.depot_to_job_time_matrix[closest_depot.id][job.id]
+            if start_time < 0:
+                continue
+            if charge < min(self.job_to_depot_charge_matrix[job.id][depot.id] for depot in self.depots_by_id.values()):
+                continue
+            self._generate_job_sequence_starting_at(job_set, [job], job, charge)
+        # Now create all combinations of start/ends which can be executed
+        fragment_counter = 0
+        for job_sequence in job_set:
+            sequence_charge = sum(
+                self.job_charge_matrix[job.id][next_job.id]  for job, next_job in zip(job_sequence, job_sequence[1:])
+            ) + sum(job.charge for job in job_sequence)
+            start_job = job_sequence[0]
+            end_job = job_sequence[-1]
+            for start_id, end_id in product(self.depots_by_id, repeat=2):
+                # check charge is acceptable
+                total_charge = (
+                    self.depot_to_job_charge_matrix[start_id][start_job.id] 
+                    + sequence_charge 
+                    + self.job_to_depot_charge_matrix[end_job.id][end_id]
                 )
+                start_time = start_job.start_time - self.depot_to_job_time_matrix[start_id][start_job.id]
+                if total_charge <= CHARGE_MAX and start_time >= 0:
+                    self.fragment_set.add(
+                        Fragment(
+                            id=fragment_counter,
+                            jobs=job_sequence,
+                            start_time=start_time,
+                            end_time=end_job.end_time + self.job_to_depot_time_matrix[end_job.id][end_id] + RECHARGE_TIME,
+                            start_depot_id=start_id,
+                            end_depot_id=end_id,
+                            charge=total_charge,
+                        )
+                    )
+                    fragment_counter += 1
+        print(len(self.fragment_set))
                 
-                if start_time < 0:
-                    continue
-                current_fragment = {
-                    "jobs": [job],
-                    "start_depot_id": depot.id,
-                    "end_depot_id": None,
-                    "start_time": start_time,
-                    "end_time": None,
-                    "charge": self.depot_to_job_charge_matrix[depot.id][job.id],
-                }
-                self._generate_fragment_starting_at(
-                    fragment_set, current_fragment, job, charge, id_counter
-                )
-        self.fragment_set = fragment_set
-        self.fragments_by_id = {fragment.id: fragment for fragment in fragment_set}
+        self.fragments_by_id = {fragment.id: fragment for fragment in self.fragment_set}
+        self.statistics["num_fragments"] = len(self.fragment_set)
         self.statistics["fragment_generation_time"] = time.time() - time0
         self.generate_contracted_fragments()
-        return fragment_set
+        return job_set
 
-    def _generate_fragment_starting_at(
+    def _generate_job_sequence_starting_at(
         self,
-        fragment_set: set[Fragment],
-        current_fragment: dict,
+        job_set: set[tuple[Job]],
+        current_jobs: list[Job],
         job: Job,
         charge: int,
-        id_counter: list[int],
     ) -> set[Fragment]:
         """
         Generates a fragment starting at a given job and depot with a given charge at a given time.
         """
-        current_jobs: list[Job] = current_fragment["jobs"]
         # Get all jobs which can be reached from the current job
         # Add this partial part of the journey as a fragment.
+        if charge < min(self.job_to_depot_charge_matrix[job.id][depot.id] for depot in self.depots_by_id.values()):
+            print("hey dawg", charge, min(self.job_to_depot_charge_matrix[job.id][depot.id] for depot in self.depots_by_id.values()))
         for id, depot in self.depots_by_id.items():
             if self.job_to_depot_charge_matrix[job.id][depot.id] <= charge:
-                finish_time = (
-                    job.end_time
-                    + self.job_to_depot_time_matrix[job.id][depot.id]
-                    + RECHARGE_TIME
-                )
-                fragment_set.add(
-                    Fragment(
-                        id=id_counter[0],
-                        jobs=tuple(current_jobs),
-                        start_time=current_fragment["start_time"],
-                        end_time=finish_time,
-                        start_depot_id=current_fragment["start_depot_id"],
-                        end_depot_id=depot.id,
-                        charge=current_fragment["charge"] + self.job_to_depot_charge_matrix[job.id][depot.id],
-                    )
-                )
-                id_counter[0] += 1
+                job_set.add(tuple(current_jobs))
+                break
 
         reachable_jobs = self.get_jobs_reachable_from(charge, job)
-        next_fragment = current_fragment.copy()
         for next_job in reachable_jobs:
             # manage memory
-            next_fragment["jobs"] = current_jobs.copy() + [next_job]
-            next_fragment["charge"] += self.job_charge_matrix[job.id][next_job.id]
             # Otherwise, generate a fragment starting at the next job
-            self._generate_fragment_starting_at(
-                fragment_set,
-                next_fragment,
+            self._generate_job_sequence_starting_at(
+                job_set,
+                current_jobs + [next_job],
                 next_job,
-                charge - self.job_charge_matrix[job.id][next_job.id],
-                id_counter,
+                charge - next_job.charge - self.job_charge_matrix[job.id][next_job.id],
             )
 
-        return fragment_set
+        return job_set
 
     def write_fragments(self) -> None:
         """Utility method to save the fragments in a json format."""
@@ -878,6 +851,7 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
                             "end_time": fragment.end_time,
                             "start_depot_id": fragment.start_depot_id,
                             "end_depot_id": fragment.end_depot_id,
+                            "charge": fragment.charge
                         }
                         for fragment in self.fragment_set
                     ],
@@ -896,30 +870,15 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
     def generate_timed_network(self) -> None:
         """Creates the compressed time network for the current instance."""
         time0 = time.time()
-        self.arrivals_by_depot_by_time = defaultdict(
-            lambda: defaultdict(set[TimedFragment])
-        )
-        self.departures_by_depot_by_time = defaultdict(
-            lambda: defaultdict(set[TimedFragment])
-        )
+        self.timed_fragments_by_depot_by_time = defaultdict(lambda: defaultdict(set[TimedFragment]))
         self.timed_fragment_by_id: dict[int, set[TimedFragment]] = {}
-        self.timed_depots_by_fragment_id: dict[int, set[TimedDepot]] = defaultdict(set)
+        self.timed_depots_by_fragment_id: dict[int, TimedDepotStore] = defaultdict(TimedDepotStore)
         for fragment in self.fragment_set:
             arrival_frag = TimedFragment(id=fragment.id, time=fragment.end_time, direction=Flow.ARRIVAL)
             departure_frag = TimedFragment(id=fragment.id, time=fragment.start_time, direction=Flow.DEPARTURE)
-            self.arrivals_by_depot_by_time[fragment.end_depot_id][fragment.end_time].add(arrival_frag)
-            self.departures_by_depot_by_time[fragment.start_depot_id][fragment.start_time].add(departure_frag)
-            self.timed_fragment_by_id[fragment.id] = {arrival_frag, departure_frag}
-        # Union of the above sets
-        self.timed_fragments_by_depot_by_time: dict[int, dict[int, set[TimedFragment]]] = {
-            depot_id: {
-                time: self.arrivals_by_depot_by_time[depot_id][time]
-                | self.departures_by_depot_by_time[depot_id][time]
-                for time in list(self.departures_by_depot_by_time[depot_id].keys())
-                + list(self.arrivals_by_depot_by_time[depot_id].keys())
-            }
-            for depot_id in self.depots_by_id
-        }
+            self.timed_fragments_by_depot_by_time[fragment.end_depot_id][fragment.end_time].add(arrival_frag)
+            self.timed_fragments_by_depot_by_time[fragment.start_depot_id][fragment.start_time].add(departure_frag)
+            self.timed_fragment_by_id[fragment.id] = [arrival_frag, departure_frag]
         self.statistics.update(
             {
                 "timed_network_generation": time.time() - time0,
@@ -958,7 +917,10 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
                         
                         timed_depots_by_depot[depot_id].add(timed_depot)
                         for tf in current_fragments:
-                            self.timed_depots_by_fragment_id[tf.id].add(timed_depot) 
+                            if tf.direction == Flow.DEPARTURE:
+                                self.timed_depots_by_fragment_id[tf.id].start = timed_depot
+                            else:
+                                self.timed_depots_by_fragment_id[tf.id].end = timed_depot
 
                         self.timed_fragments_by_timed_depot[timed_depot].update(current_fragments)
                         current_fragments = timed_fragments
@@ -969,7 +931,10 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
             timed_depot = TimedDepot(id=depot_id, time=curr_time)
             timed_depots_by_depot[depot_id].add(timed_depot)
             for tf in current_fragments:
-                self.timed_depots_by_fragment_id[tf.id].add(timed_depot) 
+                if tf.direction == Flow.DEPARTURE:
+                    self.timed_depots_by_fragment_id[tf.id].start = timed_depot
+                else:
+                    self.timed_depots_by_fragment_id[tf.id].end = timed_depot
             self.timed_fragments_by_timed_depot[timed_depot].update(current_fragments)
             self.timed_depots_by_depot = {
                 depot_id: sorted(timed_depots)
@@ -1038,12 +1003,16 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
                 else:
                     next_timed_depot = self.timed_depots_by_depot[depot][idx + 1]
                     previous_timed_depot = self.timed_depots_by_depot[depot][idx - 1]
+                    # if timed_depot == TimedDepot(time=52, id=2):
+                    #     print(previous_timed_depot, next_timed_depot)
+                    #     print([tf for tf in self.timed_fragments_by_timed_depot[timed_depot] if tf.id in [2234, 7869]])
+                    #     pass
                     constr = self.model.addConstr(
                         quicksum(
                             (1 - 2*(tf.direction == Flow.DEPARTURE))*self.fragment_vars_by_id[tf.id]
                             for tf in self.timed_fragments_by_timed_depot[timed_depot]
                         )
-                        + self.waiting_arcs[(previous_timed_depot, timed_depot)] 
+                        + self.waiting_arcs[previous_timed_depot, timed_depot] 
                         - self.waiting_arcs[timed_depot, next_timed_depot]
                         == 0,
                         name=name,
@@ -1084,34 +1053,53 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
             )
 
         for fragment_id in sorted(self.fragments_by_id):
-            val = fragment_id in all_solution_fragments
-            self.model.addConstr(
-                self.fragment_vars_by_id[fragment_id] == int(val), name=f"set_sol_f_{fragment_id}"
-            )
+            # val = fragment_id in all_solution_fragments
+            # self.model.addConstr(
+            #     self.fragment_vars_by_id[fragment_id] == int(val), name=f"set_sol_f_{fragment_id}"
+            # )
+            if fragment_id not in all_solution_fragments:
+                self.model.remove(self.fragment_vars_by_id[fragment_id])
+                del self.fragment_vars_by_id[fragment_id]
         
         timed_routes = self.get_validated_timed_solution(solution, n_vehicles)
-
+        target_depot = TimedDepot(time=67,id=0)
         waiting_arc_flows = defaultdict(int)
         # Find the waiting arcs for each route and add those in too
         for route in timed_routes:
+            #     print(route)
+            if target_depot in route:
+                pass
+            copied = route.copy()
             route = route.copy()
             # Iterate until we hit a TimedFragment, then we reset
             prev_node = route.pop(0)
             while len(route) != 0:
                 curr_node = route.pop(0)
-                if isinstance(curr_node, TimedFragment):
+                if isinstance(curr_node, Fragment):
                     # Reset the arc
                     prev_node = route.pop(0)
                     continue
+                if curr_node == target_depot or prev_node == target_depot:
+                    # print(route)
+                    print(len([r for r in timed_routes if target_depot in r]))
+                    for r in timed_routes:
+                        if target_depot in r:
+                            print(r)
+                    print(waiting_arc_flows[(prev_node, curr_node)], waiting_arc_flows[target_depot, TimedDepot(time=88, id=0)])
+                    pass
                 waiting_arc_flows[(prev_node, curr_node)] += 1
-                prev_node = curr_node
 
+            # if self.fragments_by_id[11010] in copied:
+            #     pass
+                prev_node = curr_node
+        print(waiting_arc_flows[(prev_node, curr_node)], waiting_arc_flows[target_depot, TimedDepot(time=88, id=0)])
+        # if TimedDepot(time=53, id=1) in route:
         for arc in self.waiting_arcs:
             self.model.addConstr(
                 self.waiting_arcs[arc] == waiting_arc_flows.get(arc, 0), name=f"set_sol_{arc}"
             )            
     
-    def get_validated_timed_solution(self, solution: list[set[int]], expected_vehicles: int=None) -> list[list[TimedDepot | Fragment]]:
+    def get_validated_timed_solution(self, solution: list[list[int]], expected_vehicles: int=None) -> list[list[TimedDepot | Fragment]]:
         """
         Validates the prior solution to ensure its feasbility.
         Converts a list of fragments which form a route into its consequent Timed Depot/Fragment, 
@@ -1128,7 +1116,7 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
                 fragment = self.fragments_by_id[f_id]
                 new_arcs = []
                 # Get start/end 
-                s_td, e_td = tuple(sorted(self.timed_depots_by_fragment_id[f_id]))
+                s_td, e_td = self.timed_depots_by_fragment_id[f_id].start, self.timed_depots_by_fragment_id[f_id].end
                 if i == 0:
                     # Add start -> first fragment waiting arcs, then between each pair:
                     waiting_gaps = sorted([td for td in self.timed_depots_by_depot[s_td.id] if td < s_td])
@@ -1140,6 +1128,8 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
                 if s_td not in converted_route:
                     converted_route.append(s_td)
                 converted_route.extend([fragment, e_td])
+                if f_id in [2234, 7869]:
+                    pass
                 
                 new_depots = []
                 if i == len(fragments) - 1:
@@ -1188,15 +1178,15 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
         Sequences a set of fragments into complete routes for the job horizon.
         If it is unable to sequence them, it says something
         """
-        # Sequence fragments by their start / end depots
         solution_fragment_ids = {f for f in self.fragment_vars_by_id if self.fragment_vars_by_id[f].x > 0.5}
+        # Sequence fragments by their start / end depots
         waiting_arcs = [(start, end, round(self.waiting_arcs[start, end].x)) for start, end in self.waiting_arcs if self.waiting_arcs[start, end].x > 0.5]
 
         routes = []
         fragments_by_timed_depot: dict[TimedDepot, set[tuple[TimedDepot, int]]] = defaultdict(set[tuple])
         for f_id in solution_fragment_ids:
             # Retrieve the timeddepot it starts and ends at
-            start_depot, end_depot = tuple(sorted(self.timed_depots_by_fragment_id[f_id]))
+            start_depot, end_depot = self.timed_depots_by_fragment_id[f_id].start, self.timed_depots_by_fragment_id[f_id].end
             fragments_by_timed_depot[start_depot].add((end_depot, f_id))
 
         # Set up the waiting arc counts
@@ -1298,29 +1288,46 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
                 prev_td=td
 
     def validate_fragment(self, fragment: Fragment, charge: int, prev_time: int) -> bool:
-
+        """Validates a given fragment at a time-charge level is feasible."""
         if prev_time > fragment.start_time:
             print(f"Fragment {fragment} starts too late")
             raise Exception()
-        time = fragment.start_time + self.depot_to_job_time_matrix[fragment.start_depot_id][fragment.jobs[0].id]
-
+        cumulative_charge = (
+            sum(job.charge for job in fragment.jobs) 
+            + self.depot_to_job_charge_matrix[fragment.start_depot_id][fragment.jobs[0].id]
+            + self.job_to_depot_charge_matrix[fragment.jobs[-1].id][fragment.end_depot_id]
+            + sum(self.job_charge_matrix[j1.id][j2.id] for j1, j2 in zip(fragment.jobs, fragment.jobs[1:]))
+            )
+        if cumulative_charge != fragment.charge:
+            print(f"Fragment {fragment} has incorrect charge {cumulative_charge} != {fragment.charge}")
+            raise Exception()
+        if cumulative_charge > CHARGE_MAX:
+            print(f"Fragment {fragment} has charge exceeding maximum")
+            raise Exception()
+        time = fragment.start_time 
         for j, job in enumerate(fragment.jobs):
-            if j != 0:
-                charge -= self.job_charge_matrix[job.id][fragment.jobs[j-1].id]
-                time += self.job_time_matrix[job.id][fragment.jobs[j - 1].id]
-            else:
+            if j == 0:
                 charge -= self.depot_to_job_charge_matrix[fragment.start_depot_id][job.id]
+                time += self.depot_to_job_time_matrix[fragment.start_depot_id][job.id]
+            else:
+                charge -= self.job_charge_matrix[fragment.jobs[j-1].id][job.id]
+                time += self.job_time_matrix[fragment.jobs[j - 1].id][job.id]
+
+            if j == len(fragment.jobs) - 1:
+                charge -= self.job_to_depot_charge_matrix[job.id][fragment.end_depot_id]
+                
+            charge -= job.charge
+            if charge < 0:
+                print(f"Fragment {fragment} has negative charge")
+                raise Exception()
             if time > job.start_time:
                 print(f"Fragment {fragment} starts too late")
                 raise Exception()
-            elif charge < 0:
-                print(f"Fragment {fragment} has negative charge")
-                raise Exception()
-        prev_time = fragment.end_time
-        charge -= self.job_to_depot_charge_matrix[fragment.jobs[-1].id][fragment.end_depot_id]
-        if charge < 0:
-            raise Exception(f"Fragment {fragment}\n{charge} failed at the finish line.")
-        return charge, prev_time
+            time = job.end_time
+            
+        time+=self.job_to_depot_time_matrix[job.id][fragment.end_depot_id] + RECHARGE_TIME
+        assert time  == fragment.end_time, "end time does not align"
+        return charge, time
 
     def validate_route(self, route: list[TimedDepot | Fragment]) -> bool:
         """
@@ -1333,8 +1340,10 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
         infractions = []
         charge = CHARGE_MAX
         time = prev_time = 0
+        # print("validating the following:")
         for i, location in enumerate(route):
             if isinstance(location, TimedDepot):
+                # print(location)
                 # ensure timed depots connect to the correct start fragment
                 charge=CHARGE_MAX
                 if prev_time > location.time:
@@ -1344,10 +1353,8 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
 
             elif isinstance(location, Fragment):
                 # subtract time
+                # print(f"Fragment\n  id: {location.id}\n   start: {location.start_time, location.start_depot_id}\n   end: {location.end_time, location.end_depot_id}\n  charge: {location.charge}\n   job: {location.jobs}")
                 charge, prev_time = self.validate_fragment(location, charge, prev_time)
-
-                
-
         return True
 
     def validate_solution(self, routes: list[list[TimedDepot | TimedFragment]], objective: int):
@@ -1358,6 +1365,10 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
         - All jobs must be served
         - Must have as many routes as objective value
         """
+        # all jobs must be served
+        covered_jobs = {job for r in routes for f in r if isinstance(f, Fragment) for job in f.jobs}
+        assert covered_jobs == set(self.jobs), "All jobs must be served in the solution."
+
         if len(routes) != objective:
             print(f"Objective value {objective} does not match number of routes {len(routes)}")
             return False
@@ -1449,10 +1460,11 @@ class ConstantFragmentGenerator(BaseFragmentGenerator):
             "end_depot_id": candidate["end_depot_id"],
         }
         frag_id = self.get_fragment_id(fragment)
-        if frag_id:
+        if frag_id is not None:
             print("finishing fragment found!", fragment)
             interpolated_fragment_ids.append(frag_id)
         else:
+            print(fragment["jobs"] in self.feasible_job_sequences)
             raise Exception(f"No fragment found :( stop being bad at your job, {fragment}")
         return interpolated_fragment_ids
 
@@ -1466,15 +1478,21 @@ def main():
 
 
     # Specify the directory you want to search
-    directory = "data/instances_regular/"
+    directory = "data/instances_large/"
+    # directory = "data/instances_regular/"
 
     # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
     json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
-
+    EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
     # Iterate over the list of filepaths & open each file
     for json_file in json_files:     
         if "fragments" in str(json_file):
             continue
+        # if any(ex in str(json_file) for ex in EXCLUDED_INSTANCES):
+        # if "I-3-3-100-08.json" not in str(json_file):
+        # if "I-5-5-200-07.json" not in str(json_file):
+        # if "I-3-3-100-05" not in str(json_file):
+            # continue
         # if "50" not in str(json_file):
         #     continue
         print(f"Solving {json_file}...")
@@ -1483,8 +1501,8 @@ def main():
         # remove the last /, append fragments and then the part on the other side f the slice
 
         frag_file = json_file.split("/")
-        prev_runs = pd.read_csv("results.csv")
-        if frag_file[-1].split(".")[0] in prev_runs["label"].values:
+        prev_runs = pd.read_csv("large_results.csv")
+        if frag_file[-1].split(".")[0] in prev_runs[prev_runs["method"] == "fragments"]["label"].values:
             continue
         str_frag_file = "/".join(frag_file[:-1]) + "/fragments/" + "f-" + frag_file[-1]
         fragments = generator.generate_fragments()#file=str_frag_file)
@@ -1496,26 +1514,32 @@ def main():
         #     a for d in generator.timed_depots_by_depot for a in zip(generator.timed_depots_by_depot[d][:-1], generator.timed_depots_by_depot[d][1:])
         # ),
         # generator.timed_fragments_by_timed_node)
-        # print("writing fragments...")
-        # generator.write_fragments()
+        print("writing fragments...")
+        generator.write_fragments()
         print("building model...")
         generator.build_model()
-        # print("incumbent solution")
-        # prior_solution,solution_routes = generator.read_solution(instance_type=frag_file[-2].split("instances_")[-1])
-        # for s in solution_routes:
-        #     print(s)
-        # generator.get_validated_timed_solution(prior_solution)
+        print("incumbent solution")
+        # prior_solution, solution_routes = generator.read_solution(instance_type=frag_file[-2].split("instances_")[-1])
+        
+        # generator.visualise_routes(generator.get_validated_timed_solution(prior_solution))
         # generator.set_solution(prior_solution, n_vehicles=len(prior_solution))
-        # print("solving...")
+        # all_prior_fragments = set(f for s in prior_solution for f in s)
+        # get fragments associated with a timed depot
+        
+        print("solving...")
         generator.solve()
         # print(f"Prior Solution: {len(solution_routes)}")
-        # for s in solution_routes:
-        #     print(s)
         print("sequencing routes...")
-        routes = generator.create_routes()
-        print(f"Fragment routes: {len(routes)}")
-        generator.validate_solution(routes, generator.model.objval)
-        generator.write_statistics(file="results.csv")
+        # routes = generator.create_routes()
+        # print(f"Fragment routes: {len(routes)}")
+        # generator.validate_solution(routes, generator.model.objval)
+        # paper_results = pd.read_excel('data/mdevs_solutions.xlsx', sheet_name="results_large_BCH")
+        # paper_results = paper_results[paper_results["battery"] == "constant-time"]
+        # # check the incumbent solution
+        # assert generator.model.objval == paper_results[paper_results["ID_instance"] == generator.data["ID"]]["objective_value"].values[0]
 
+        generator.statistics["method"] = "fragments"
+        generator.write_statistics(file="large_results.csv")
+        # defaultdict(default_factory=)
 if __name__ == "__main__":
     main()
