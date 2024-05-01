@@ -1,4 +1,0 @@
-,type,label,num_fragments,fragment_generation_time,timed_network_generation,timed_network_size,timed_network_compression,compressed_network_nodes,objective,runtime,node_count,gap,method
-0,constant-charging,I-7-7-2000-04,475671,22.05642318725586,2.650075674057007,23483,1.4922549724578855,7545,21.0,35.852423906326294,1.0,0.0,fragments
-1,constant-charging,I-7-7-3000-01,762836,47.06882047653198,4.7852942943573,34830,2.4632294178009038,11365,21.0,88.62256908416748,1.0,0.0,fragments
-2,constant-charging,I-7-7-3000-05,727415,49.51583957672119,4.102705001831055,34808,2.321518898010254,11277,22.0,138.392245054245,1.0,0.0,fragments

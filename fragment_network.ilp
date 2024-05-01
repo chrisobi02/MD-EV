@@ -3,6 +3,6 @@
 Minimize
  
 Subject To
- job_67: = 1
+ job_0: = 1
 Bounds
 End

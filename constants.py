@@ -7,11 +7,12 @@ VEHICLE_MOVE_SPEED_PER_HOUR = 10000
 # Length of 1 time unit in minutes
 TIME_UNIT_IN_MINUTES = 0.5
 VEHICLE_MOVE_SPEED_PER_UNIT = VEHICLE_MOVE_SPEED_PER_HOUR / 60 * TIME_UNIT_IN_MINUTES
-# percentage of max charge used per metre
-CHARGE_PER_METRE = 0.05 * 100 / 1000
 # percentage of maximum charge per unit of charge
 CHARGE_PER_UNIT = 0.5
-CHARGE_MAX = 100 / CHARGE_PER_UNIT
+UNDISCRETISED_MAX_CHARGE = 100
+CHARGE_MAX = int(UNDISCRETISED_MAX_CHARGE / CHARGE_PER_UNIT)
+# percentage of max charge used per metre - 5% of max charge per km
+CHARGE_PER_METRE = (0.05 * UNDISCRETISED_MAX_CHARGE) / (1000 * CHARGE_PER_UNIT)
 # Time cost of swapping batteries over in time units
 RECHARGE_TIME = 6
 
@@ -30,7 +31,8 @@ class TimedDepot:
     def route_str(self):
         return f"D{self.id}"
 
-
+class ChargeDepot(TimedDepot):
+    charge: int
 @dataclass(frozen=True)
 class Job:
     id: int
@@ -41,9 +43,15 @@ class Job:
     building_end_id: int
     start_location: tuple
     end_location: tuple
+    id_offset: int = None #Offset to convert to IP / paper indices
     @property
     def route_str(self):
         return f"{self.id}"
+    
+    @property
+    def offset_id(self):
+        """Returns the IP / paper index of the job."""
+        return self.id + self.id_offset
 
 
 @dataclass(frozen=True)
@@ -57,6 +65,10 @@ class Building:
     @property
     def route_str(self):
         return f"D{self.id}"
+     
+    @property 
+    def offset_id(self):
+        return self.id
 
 
 @dataclass(frozen=True)
@@ -71,14 +83,12 @@ class Fragment:
 
     @property
     def route_str(self):
-        return "->".join([str(j.id) for j in self.jobs])
+        return " -> ".join([str(j.id) for j in self.jobs])
 
     @property
     def verbose_str(self):
         return f"{self.id}:\n   {self.start_time} -> {self.end_time}, {self.start_depot_id} -> {self.end_depot_id}\n    {[j.id for j in self.jobs]}"
 
-
-# used in the time/space compresion of the network  ("time", int), ("id", int), ("direction", Flow)
 
 
 @dataclass(frozen=True, order=True)
