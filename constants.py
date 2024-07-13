@@ -1,29 +1,39 @@
 from dataclasses import dataclass
-from typing import NamedTuple
 from enum import Enum
-
-# speed in metres per hour
-VEHICLE_MOVE_SPEED_PER_HOUR = 10000
-# Length of 1 time unit in minutes
-TIME_UNIT_IN_MINUTES = 0.5
-VEHICLE_MOVE_SPEED_PER_UNIT = VEHICLE_MOVE_SPEED_PER_HOUR / 60 * TIME_UNIT_IN_MINUTES
-# percentage of maximum charge per unit of charge
-CHARGE_PER_UNIT = 0.5
-UNDISCRETISED_MAX_CHARGE = 100
-CHARGE_MAX = int(UNDISCRETISED_MAX_CHARGE / CHARGE_PER_UNIT)
-# percentage of max charge used per metre - 5% of max charge per km
-CHARGE_PER_METRE = (0.05 * UNDISCRETISED_MAX_CHARGE) / (1000 * CHARGE_PER_UNIT)
-# Time cost of swapping batteries over in time units
-RECHARGE_TIME = 6
-
 
 class Flow(Enum):
     ARRIVAL = "ARRIVAL"
     DEPARTURE = "DEPARTURE"
 
+@dataclass
+class CalculationConfig:
+    """
+    Parameters which define the calculations for a given MDEVS instance.
+    All distance measures are in metres. 
+    The default values are those used in the paper
+    """
+    UNDISCRETISED_MAX_CHARGE: int = 100
+    CHARGE_PER_UNIT: float = 0.5
+    PERCENTAGE_CHARGE_PER_METRE: float = 5e-5 # 5% per km
+    TIME_UNIT_IN_MINUTES: float = 0.5
+    RECHARGE_TIME: int = 6
+    VEHICLE_MOVE_SPEED_PER_MINUTE: float = 1000 / 6 
+
+    @property
+    def MAX_CHARGE(self) -> int:
+        return int(self.UNDISCRETISED_MAX_CHARGE / self.CHARGE_PER_UNIT)
+
+    @property
+    def CHARGE_PER_METRE(self) -> float:
+        return self.PERCENTAGE_CHARGE_PER_METRE * self.UNDISCRETISED_MAX_CHARGE / self.CHARGE_PER_UNIT
+
+    @property
+    def VEHICLE_MOVE_SPEED_PER_UNIT(self) -> float:
+        return self.VEHICLE_MOVE_SPEED_PER_MINUTE * self.TIME_UNIT_IN_MINUTES
 
 @dataclass(frozen=True, order=True)
 class TimedDepot:
+    """A Depot which tracks time state."""
     time: int
     id: int
     
@@ -32,9 +42,11 @@ class TimedDepot:
         return f"D{self.id}"
 
 class ChargeDepot(TimedDepot):
+    """A Depot which contains both charge and time state."""
     charge: int
 @dataclass(frozen=True)
 class Job:
+    """Encodes the timing, charge and location information for a job in the MDEVS instance."""
     id: int
     start_time: int
     end_time: int
@@ -73,6 +85,7 @@ class Building:
 
 @dataclass(frozen=True)
 class Fragment:
+    """Encodes a sequence of Jobs which are executed in sequence without visiting a charge station."""
     id: int
     jobs: tuple[Job]  # An ordered tuple of jobs
     start_time: int
@@ -97,21 +110,37 @@ class TimedFragment:
     id: int
     direction: Flow
 
-
-@dataclass(frozen=True)
-class ContractedFragment:
-    jobs: tuple[Job]
-    start_depot_ids: list[int]
-    end_depot_ids: list[int]
-
-@dataclass(frozen=True)
-class Route:
-    jobs: tuple[Job]
-    start_depot_id: int
-    end_depot_id: int
-    start_time: int
-    end_time: int
 @dataclass()
 class TimedDepotStore:
     start: TimedDepot=None
     end: TimedDepot=None
+
+@dataclass(order=True)
+class Label:
+    """A dataclass which tracks a given node's"""
+    uncompressed_end_depot: TimedDepot | ChargeDepot
+    end_depot: TimedDepot | ChargeDepot
+    flow: float | int
+    prev_label: 'Label'
+    f_id: int | None # Fragment id
+
+@dataclass()
+class Arc:
+    end_depot: TimedDepot | ChargeDepot # Target depot
+    start_depot: TimedDepot | ChargeDepot 
+    flow: float # Number of vehicles
+    f_id: int | None # Fragment id
+
+@dataclass()
+class Route:
+    """Dataclass which encompasses a route and the many forms it can be expressed"""
+    route_list: list[TimedDepot | ChargeDepot | Fragment]
+    
+    @property
+    def jobs(self) -> set[Job]:
+        return set(j for f in self.route_list if isinstance(f, Fragment) for j in f.jobs)
+    
+    @classmethod
+    def from_timed_fragments(cls, route_list: list[TimedDepot | ChargeDepot | TimedFragment]):
+        """Creates a Route from a list of timed fragments/depots."""
+        raise NotImplementedError()

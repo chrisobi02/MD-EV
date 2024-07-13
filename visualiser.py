@@ -5,7 +5,7 @@ import networkx as nx
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from constants import Fragment, TimedDepot, TimedFragment, Flow, Route
+from constants import TimedDepot
 from plotly import graph_objects as go, express as px
 
 def visualise_map(data: dict):

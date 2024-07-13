@@ -17,9 +17,11 @@ import math
 from constants import *
 
 class NonLinearFragmentGenerator(BaseFragmentGenerator):
-    def __init__(self, file: str):
-        super().__init__(file)
-    
+    def __init__(self, file: str, params: dict = {}):
+        super().__init__(file, params=params)
+         
+        self.dilation_factor = self.config.UNDISCRETISED_MAX_CHARGE / 100 * self.config.CHARGE_PER_UNIT 
+
     def get_charge(self, charge: int, recharge_time: int):
         """
         Determines the state of charge given a charge level and the amount of time it has to charge.
@@ -32,26 +34,24 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
     def get_charge_at_time(self, t: int) -> int:
         """returns the charge level from 0% when charging for t units of time"""
         # Scale function based on proportion of 100% charge.
-        dilation_factor = CHARGE_MAX/200
 
-        if t <= 80 * dilation_factor:
+        if t <= 80 * self.dilation_factor:
             charge = 2 * t
-        elif t <= 160 * dilation_factor:
+        elif t <= 160 * self.dilation_factor:
             charge = 640/3 - 12800 / (3*t - 160)
         else:
             charge = 200
-        return math.floor(charge * dilation_factor)
+        return math.floor(charge * self.dilation_factor)
     
     def charge_inverse(self, charge: int):
         """Returns the time to charge to a certain level"""
-        dilation_factor = CHARGE_MAX/200
-        if charge <= 160 * dilation_factor:
+        if charge <= 160 * self.dilation_factor:
             t = charge / 2
-        elif charge <= 200 * dilation_factor:
+        elif charge <= 200 * self.dilation_factor:
             t = (38400 - 160 * charge) / (640 - 3 * charge)
         else:
             t = 160
-        return math.ceil(t / dilation_factor)
+        return math.ceil(t / self.dilation_factor)
     
     def get_charge_offset(self) -> int:
         """Utility method to change the charge offset in fragment generation"""
@@ -88,7 +88,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
 
             # 2.
             charge_cost = next_job.charge + self.job_charge_matrix[job.id][next_job.id] + min(
-                self.job_to_depot_charge[next_job.id][depot.id]
+                self.job_to_depot_charge_matrix[next_job.id][depot.id]
                 for depot in self.depots_by_id.values()
             )
             if charge < charge_cost:
@@ -108,7 +108,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 - RECHARGE_TIME
             )
 
-            new_charge = self.get_charge(charge - self.job_to_depot_charge[job.id][closest_depot.id], recharge_time)
+            new_charge = self.get_charge(charge - self.job_to_depot_charge_matrix[job.id][closest_depot.id], recharge_time)
             # 3.
             if new_charge - self.depot_to_job_charge_matrix[closest_depot.id][next_job.id] >= charge - self.job_charge_matrix[job.id][next_job.id]:
                 # Can reach job with a higher charge than if it were reached directly
@@ -139,7 +139,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.timed_depots_by_depot = defaultdict(list)
         for depot_id in self.depots_by_id:
             for time in self.timed_fragments_by_depot_by_time[depot_id]:
-                self.timed_depots_by_depot[depot_id].append(ChargeDepot(time=time, id=depot_id, charge=CHARGE_MAX))
+                self.timed_depots_by_depot[depot_id].append(ChargeDepot(time=time, id=depot_id, charge=MAX_CHARGE))
 
 
 
@@ -159,7 +159,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         - Be able to feasibly reach each location in time        
         """
         infractions = []
-        charge = CHARGE_MAX
+        charge = MAX_CHARGE
         time = prev_time = 0
         # print("validating the following:")
         for i, location in enumerate(route):
