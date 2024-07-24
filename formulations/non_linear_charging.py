@@ -1,26 +1,14 @@
-import json
-import os
-import time
 from collections import defaultdict
-import heapq
-from gurobipy import Model, GRB, quicksum
-import pandas as pd
-from typing import TypeVar
-import glob
-from abc import ABC, abstractmethod
-from itertools import product
-from constants import Fragment, Job, TimedDepot
-from visualiser import visualise_timed_network, visualise_routes
-from fragment_generation import BaseFragmentGenerator
 import math
+import time as timer
 
-from constants import *
+from formulations.base import *
 
 class NonLinearFragmentGenerator(BaseFragmentGenerator):
-    def __init__(self, file: str, params: dict = {}):
-        super().__init__(file, params=params)
-         
+    def __init__(self, file: str, config: dict = {}):
+        super().__init__(file, params=config)
         self.dilation_factor = self.config.UNDISCRETISED_MAX_CHARGE / 100 * self.config.CHARGE_PER_UNIT 
+        self.timed_depots_by_depot: dict[int, list[ChargeDepot]] = defaultdict(list)
 
     def get_charge(self, charge: int, recharge_time: int):
         """
@@ -33,7 +21,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
 
     def get_charge_at_time(self, t: int) -> int:
         """returns the charge level from 0% when charging for t units of time"""
-        # Scale function based on proportion of 100% charge.
 
         if t <= 80 * self.dilation_factor:
             charge = 2 * t
@@ -52,10 +39,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         else:
             t = 160
         return math.ceil(t / self.dilation_factor)
-    
-    def get_charge_offset(self) -> int:
-        """Utility method to change the charge offset in fragment generation"""
-        return 0
 
     def _get_jobs_reachable_from(
             self,
@@ -69,7 +52,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         1. The candidate job must be reachable before its start time.
         2. The candidate job must be able to reach a depot from the new job.
         3. A detour to a depot will not result in the vehicle reaching the job with a higher charge than it would have directly.
-
         """
         reachable_jobs = []
         t = job.end_time
@@ -83,7 +65,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             # 1.
             arrival_time = t + self.job_time_matrix[job.id][next_job.id]
             if next_job.start_time < arrival_time:
-                # Cannot reach job before it starts
                 continue
 
             # 2.
@@ -92,33 +73,39 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 for depot in self.depots_by_id.values()
             )
             if charge < charge_cost:
-                # Cannot reach job and recharge.
                 continue
             
             # Find the depot with the minimum time to traverse from job, then back to next job
             closest_depot = min(
                 self.depots, 
-                key=lambda depot: self.job_to_depot_time_matrix[job.id][depot.id] + self.depot_to_job_time_matrix[depot.id][next_job.id]
+                key=(
+                    lambda depot: self.job_to_depot_time_matrix[job.id][depot.id]
+                    + self.depot_to_job_time_matrix[depot.id][next_job.id]
+                )
             )
             recharge_time = (
                 next_job.start_time 
                 - t
                 - self.job_to_depot_time_matrix[job.id][closest_depot.id] 
                 - self.depot_to_job_time_matrix[closest_depot.id][next_job.id]
-                - RECHARGE_TIME
+                - self.config.CHARGE_BUFFER
             )
 
-            new_charge = self.get_charge(charge - self.job_to_depot_charge_matrix[job.id][closest_depot.id], recharge_time)
             # 3.
-            if new_charge - self.depot_to_job_charge_matrix[closest_depot.id][next_job.id] >= charge - self.job_charge_matrix[job.id][next_job.id]:
+            detour_charge = (
+                self.get_charge(charge - self.job_to_depot_charge_matrix[job.id][closest_depot.id], recharge_time)
+                - self.depot_to_job_charge_matrix[closest_depot.id][next_job.id]
+            )
+            direct_charge = charge - self.job_charge_matrix[job.id][next_job.id]
+            if detour_charge >= direct_charge:
                 # Can reach job with a higher charge than if it were reached directly
                 continue
-
             reachable_jobs.append(next_job)
+
         return reachable_jobs
 
     def generate_timed_network(self) -> None:
-        time0 = time.time()
+        time0 = timer.time()
         self.timed_fragments_by_depot_by_time = defaultdict(lambda: defaultdict(set[TimedFragment]))
         self.timed_fragment_by_id: dict[int, set[TimedFragment]] = {}
         self.timed_depots_by_fragment_id: dict[int, TimedDepotStore] = defaultdict(TimedDepotStore)
@@ -131,7 +118,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         
         self.statistics.update(
             {
-                "timed_network_generation": time.time() - time0,
+                "timed_network_generation": timer.time() - time0,
                 "timed_network_size": sum(len(v) for v in self.timed_fragments_by_depot_by_time.values())
             }
         )
@@ -139,16 +126,9 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.timed_depots_by_depot = defaultdict(list)
         for depot_id in self.depots_by_id:
             for time in self.timed_fragments_by_depot_by_time[depot_id]:
-                self.timed_depots_by_depot[depot_id].append(ChargeDepot(time=time, id=depot_id, charge=MAX_CHARGE))
-
-
-
-    def build_model(self):
-        pass
-
-    def set_solution(self, solution: list[set[int]], n_vehicles=None):
-        pass
-
+                self.timed_depots_by_depot[depot_id].append(
+                    ChargeDepot(time=time, id=depot_id, charge=self.config.MAX_CHARGE)
+                )
 
     def validate_route(self, route: list[TimedDepot | Fragment]) -> bool:
         """
@@ -158,43 +138,16 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         - Never go below 0 charge
         - Be able to feasibly reach each location in time        
         """
+        raise NotImplementedError()
         infractions = []
-        charge = MAX_CHARGE
-        time = prev_time = 0
+        charge = self.config.MAX_CHARGE
+        current_time = prev_time = 0
         # print("validating the following:")
         for i, location in enumerate(route):
-            if isinstance(location, TimedDepot):
-                # print(location)
-                # ensure timed depots connect to the correct start fragment
-                time = location.time
-                charge = self.get_charge(charge, time - prev_time)
-                if prev_time > location.time:
-                    print(f"depot {location} is after the fragment returns")
-                    raise Exception()
-                # prev_time= min(td for td in self.timed_depots_by_depot[location.id] if td.time >= location.time).time
-
+            if isinstance(location, ChargeDepot):
+                pass
             elif isinstance(location, Fragment):
                 charge, prev_time = self.validate_fragment(location, charge, prev_time)
-        return True
-
-    def validate_solution(self, routes: list[list[TimedDepot | TimedFragment]], objective: int):
-        """
-        Validates the input solution routes to ensure they are feasible.
-        For a solution to be feasible:
-        - All routes must be feasible
-        - All jobs must be served
-        - Must have as many routes as objective value
-        """
-        # all jobs must be served
-        covered_jobs = {job for r in routes for f in r if isinstance(f, Fragment) for job in f.jobs}
-        assert covered_jobs == set(self.jobs), "All jobs must be served in the solution."
-
-        if len(routes) != objective:
-            print(f"Objective value {objective} does not match number of routes {len(routes)}")
-            return False
-        for route in routes:
-            if not self.validate_route(route):
-                return False
         return True
     
     def get_validated_timed_solution(self, solution: list[set[int]], expected_vehicles: int = None) -> list[list[TimedDepot | Fragment]]:
