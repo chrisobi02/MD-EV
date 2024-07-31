@@ -11,15 +11,9 @@ from mdevs.formulations.base import *
 T = TypeVar("T")
 
 class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
+    TYPE = "constant-charging"
     def __init__(self, file: str, params: dict={}) -> None:
         super().__init__(file, params=params)
-        self.type = "constant-charging"
-        self.statistics.update(
-            {
-                "type": self.type,
-                "label": self.data["label"],
-            }
-        )
         
     def _get_jobs_reachable_from(self, charge: int, job: Job) -> list[Job]:
         """
@@ -48,7 +42,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
 
             recharge_time = min(
                 self.job_to_depot_time_matrix[job.id][depot.id]
-                + self.config.RECHARGE_TIME
+                + self.config.RECHARGE_TIME_IN_MINUTES
                 + self.depot_to_job_time_matrix[depot.id][next_job.id]
                 for depot in self.depots
                 if self.job_to_depot_charge_matrix[job.id][depot.id] <= charge
@@ -177,8 +171,6 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                 if s_td not in converted_route:
                     converted_route.append(s_td)
                 converted_route.extend([fragment, e_td])
-                if f_id in [2234, 7869]:
-                    pass
                 
                 new_depots = []
                 if i == len(fragments) - 1:
@@ -427,112 +419,6 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
             return [v["job"] for v in violations]
         
         return violations
-  
-    def forward_label(self) -> list[Route]:
-        """
-        Sequences the solution routes using a forward labelling procedure.
-        """
-        label_heap: list[Label] = [] # min heap of Labels
-        routes = []
-        solution_fragment_ids = {(f, self.fragment_vars_by_id[f].x) for f in self.fragment_vars_by_id if self.fragment_vars_by_id[f].x > 0.5}
-        # Sequence fragments by their start / end depots
-        waiting_arcs = [
-            (start, end, round(self.waiting_arcs[start, end].x)) 
-            for start, end in self.waiting_arcs if self.waiting_arcs[start, end].x > 0.5
-        ]
-        
-        # Get the first and last TimedDepot for each Depot 
-        start_depots = {min(depot_list) for depot_list in self.timed_depots_by_depot.values()}
-        end_depots = {max(depot_list) for depot_list in self.timed_depots_by_depot.values()}
-
-        arcs_by_timed_depot: dict[TimedDepot, list[Arc]] = defaultdict(list[Arc])
-        for f_id, f_flow in solution_fragment_ids:
-            # Retrieve the timed depot it starts and ends at
-            start_depot, end_depot = self.timed_depots_by_fragment_id[f_id].start, self.timed_depots_by_fragment_id[f_id].end
-            arcs_by_timed_depot[start_depot].append(Arc(start_depot=start_depot, end_depot=end_depot, f_id=f_id, flow=f_flow))     
-            if start_depot not in start_depots:
-                continue
-            # Decompress the network such that a min heap on time is real. 
-            # To do this, we need to map these depots back to their true time.
-            fragment = self.fragments_by_id[f_id]
-            # start_depot = TimedDepot(time=fragment.start_time, id=fragment.start_depot_id)
-            uncompressed_end_depot = TimedDepot(time=fragment.end_time, id=fragment.end_depot_id)
-            
-            start_label = Label(
-                    flow=1, #TODO: THIS WONT WORK IN THE LP RELAXATION
-                    prev_label=Label(
-                        uncompressed_end_depot=uncompressed_end_depot, end_depot=start_depot, prev_label=None, flow=1, f_id=None
-                    ),
-                    end_depot=end_depot,
-                    f_id=f_id, 
-                    uncompressed_end_depot=uncompressed_end_depot
-                )
-            heapq.heappush(
-                label_heap,
-                start_label 
-            )
-
-        # Add any start labels
-        for start_depot, end_depot, count in waiting_arcs:
-            arcs_by_timed_depot[start_depot].append(
-                Arc(start_depot=start_depot, end_depot=end_depot, f_id=None, flow=count)
-            )     
-            
-            if start_depot not in start_depots:
-                continue
-
-            start_label = Label(uncompressed_end_depot=start_depot, flow=count, end_depot=start_depot, prev_label=None, f_id=None)
-            heapq.heappush(
-                label_heap, 
-                Label(uncompressed_end_depot=start_depot, flow=count, prev_label=start_label, end_depot=end_depot, f_id=None)
-            )
-
-        while len(label_heap) != 0:
-            label = heapq.heappop(label_heap)
-            label_flow = label.flow
-            arcs = arcs_by_timed_depot[label.end_depot]
-            # Check if there are no arcs leaving this depot. If that's the case then this is an end point
-            # TODO: confirm this 
-            if len(arcs) == 0:
-                if label.end_depot not in end_depots:
-                    raise Exception("Route ends before the last depot time - very bad:(")
-                # assemble the route backwards
-                route = []
-                while label.prev_label is not None:
-                    route.append(label.end_depot)
-                    if label.f_id is not None:
-                        route.append(self.fragments_by_id[label.f_id])
-                    label = label.prev_label
-                route.append(label.end_depot)
-                routes.append(Route(route_list=route[::-1]))
-
-            for i, arc in enumerate(arcs):
-                if arc.flow == 0: # TODO: Tolerance may be needed
-                    continue
-                delta = min(arc.flow, label_flow)
-                uncompressed_end_depot = arc.end_depot
-
-                if arc.f_id is not None:
-                    fragment = self.fragments_by_id[arc.f_id]
-                    uncompressed_end_depot = TimedDepot(time=fragment.end_time, id=fragment.end_depot_id)
-                heapq.heappush(
-                    label_heap,
-                    Label(
-                        uncompressed_end_depot=uncompressed_end_depot,
-                        end_depot=arc.end_depot,
-                        prev_label=label,
-                        flow=delta,
-                        f_id=arc.f_id
-                    )
-                )
-
-                # Decrement flow on the arc and the label
-                arc.flow -= delta
-                label_flow -= delta
-                
-                if label_flow == 0:
-                    break
-        return routes                  
 
     def run(self) -> None:
         """Runs an end-to-end solve ."""

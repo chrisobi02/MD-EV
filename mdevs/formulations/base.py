@@ -10,6 +10,7 @@ from itertools import product
 from gurobipy import Model, GRB, quicksum
 from dataclasses import dataclass
 from enum import Enum
+import heapq
 
 T = TypeVar("T")
 
@@ -19,6 +20,7 @@ class Flow(Enum):
     UNDIRECTED = "UNDIRECTED"
 
 UNREACHABLE = -1
+EPS = 1e-6
 
 @dataclass()
 class CalculationConfig:
@@ -31,7 +33,7 @@ class CalculationConfig:
     CHARGE_PER_UNIT: float = 0.5
     PERCENTAGE_CHARGE_PER_METRE: float = 5e-5 # 5% per km
     TIME_UNIT_IN_MINUTES: float = 0.5
-    RECHARGE_TIME: int = 3
+    RECHARGE_TIME_IN_MINUTES: int = 3
     VEHICLE_MOVE_SPEED_PER_MINUTE: float = 1000 / 6 
 
     @property
@@ -49,7 +51,7 @@ class CalculationConfig:
     @property
     def CHARGE_BUFFER(self) -> float:
         """Delay between arrival and charging"""
-        return self.RECHARGE_TIME / self.TIME_UNIT_IN_MINUTES
+        return self.RECHARGE_TIME_IN_MINUTES / self.TIME_UNIT_IN_MINUTES
 
 @dataclass(frozen=True, order=True)
 class TimedDepot:
@@ -139,14 +141,50 @@ class TimedDepotStore:
     start: TimedDepot=None
     end: TimedDepot=None
 
-@dataclass(order=True)
+@dataclass()
 class Label:
     """A dataclass which tracks a given node's"""
     uncompressed_end_depot: TimedDepot | ChargeDepot
     end_depot: TimedDepot | ChargeDepot
     flow: float | int
-    prev_label: 'Label'
     f_id: int | None # Fragment id
+    prev_label: 'Label | None'
+
+    def __lt__(self, other: 'Label') -> bool:
+        if self.uncompressed_end_depot != other.uncompressed_end_depot:
+            return self.uncompressed_end_depot < other.uncompressed_end_depot
+        if self.end_depot != other.end_depot:
+            return self.end_depot < other.end_depot
+        if self.flow != other.flow:
+            return self.flow < other.flow
+        return False
+
+    def __le__(self, other: 'Label') -> bool:
+        if self.uncompressed_end_depot != other.uncompressed_end_depot:
+            return self.uncompressed_end_depot <= other.uncompressed_end_depot
+        if self.end_depot != other.end_depot:
+            return self.end_depot <= other.end_depot
+        if self.flow != other.flow:
+            return self.flow <= other.flow
+        return True
+
+    def __gt__(self, other: 'Label') -> bool:
+        if self.uncompressed_end_depot != other.uncompressed_end_depot:
+            return self.uncompressed_end_depot > other.uncompressed_end_depot
+        if self.end_depot != other.end_depot:
+            return self.end_depot > other.end_depot
+        if self.flow != other.flow:
+            return self.flow > other.flow
+        return False
+
+    def __ge__(self, other: 'Label') -> bool:
+        if self.uncompressed_end_depot != other.uncompressed_end_depot:
+            return self.uncompressed_end_depot >= other.uncompressed_end_depot
+        if self.end_depot != other.end_depot:
+            return self.end_depot >= other.end_depot
+        if self.flow != other.flow:
+            return self.flow >= other.flow
+        return True
 
 @dataclass()
 class Arc:
@@ -192,6 +230,7 @@ class BaseMDEVCalculator(ABC):
         self.jobs_by_id: dict[int, Job] = self.to_dataclass_by_id(self.data["jobs"], Job, id_offset=len(self.depots_by_id))
         self.jobs: list[Job] = list(self.jobs_by_id.values())
         self.config = CalculationConfig(**config)
+        self.statistics = {}
 
     def to_dataclass_by_id(
         self, json_data: list[dict], dataclass: T, id_field: str = "id", **kwargs
@@ -316,6 +355,7 @@ class BaseMDEVCalculator(ABC):
         return " -> ".join([loc.route_str for loc in route])
     
 class BaseFragmentGenerator(BaseMDEVCalculator):
+    TYPE = None
     def __init__(self, file: str, params: dict={}) -> None:
         super().__init__(file, config=params)
         self.generate_cost_matrices()
@@ -324,9 +364,13 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
         self.fragment_vars_by_id: dict[int, Fragment] = {}
         self.timed_depots_by_depot: dict[int, list[TimedDepot]] = defaultdict(list)
         self.timed_fragments_by_timed_depot: dict[TimedDepot, set[TimedFragment]] = defaultdict(set[TimedFragment])
+        self.timed_depots_by_fragment_id: dict[int, TimedDepotStore] = defaultdict(TimedDepotStore)
         self.waiting_arcs: dict[tuple[TimedDepot, TimedDepot], GRB.Var] = {}
         self.model = Model("fragment_network")
-        self.statistics: dict[str, int | float] = {}
+        self.statistics: dict[str, int | float] = {
+                "type": self.TYPE,
+                "label": self.data["label"],
+        }
 
     def generate_cost_matrices(self):
         self.generate_building_distance_matrix()
@@ -618,26 +662,16 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
         Sequences a set of fragments into complete routes for the job horizon.
         If it is unable to sequence them, it says something
         """
-        # Sequence fragments by their start / end depots
         solution_fragment_ids = {f for f in self.fragment_vars_by_id if self.fragment_vars_by_id[f].x > 0.5}
+        # Sequence fragments by their start / end depots
         waiting_arcs = [(start, end, round(self.waiting_arcs[start, end].x)) for start, end in self.waiting_arcs if self.waiting_arcs[start, end].x > 0.5]
 
         routes = []
         fragments_by_timed_depot: dict[TimedDepot, set[tuple[TimedDepot, int]]] = defaultdict(set[tuple])
         for f_id in solution_fragment_ids:
             # Retrieve the timeddepot it starts and ends at
-            for timed_depot in self.timed_fragments_by_timed_depot:
-                if f_id in [tf.id for tf in self.timed_fragments_by_timed_depot[timed_depot] if tf.direction == Flow.DEPARTURE]:
-                    fragment = self.fragments_by_id[f_id] 
-                    destination_depot = None
-                    for td in self.timed_depots_by_depot[fragment.end_depot_id]:
-                        for tf in self.timed_fragments_by_timed_depot[td]:
-                            if tf.id == fragment.id:
-                                destination_depot = td
-                                break
-                    fragments_by_timed_depot[timed_depot].add((destination_depot, f_id))
-                    break
-
+            start_depot, end_depot = self.timed_depots_by_fragment_id[f_id].start, self.timed_depots_by_fragment_id[f_id].end
+            fragments_by_timed_depot[start_depot].add((end_depot, f_id))
 
         # Set up the waiting arc counts
         flow_by_waiting_arc_start = defaultdict(lambda : defaultdict(int))
@@ -652,11 +686,118 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
             start_depot = min(timed_depots)
             # Following fragments
             while len(fragments_by_timed_depot[start_depot]) != 0 or len(flow_by_waiting_arc_start[start_depot]) != 0:
-                route = self.get_fragments_from(
-                    start_depot, [start_depot], fragments_by_timed_depot, flow_by_waiting_arc_start
-                )
+                route = self.get_fragments_from(start_depot, [start_depot], fragments_by_timed_depot, flow_by_waiting_arc_start)
                 routes.append(route)
-        return routes
+        return routes      
+
+    def forward_label(self) -> list[Route]:
+        """
+        Sequences the solution routes using a forward labelling procedure.
+        """
+        label_heap: list[Label] = [] # min heap of Labels
+        routes = []
+        solution_fragment_ids: set[tuple[int, int]] = {
+            (f, self.fragment_vars_by_id[f].x) for f in self.fragment_vars_by_id if self.fragment_vars_by_id[f].x > EPS
+        }
+        # Sequence fragments by their start / end depots
+        waiting_arcs = [
+            (start, end, round(self.waiting_arcs[start, end].x)) 
+            for start, end in self.waiting_arcs if self.waiting_arcs[start, end].x > EPS
+        ]
+        
+        # Get the first and last TimedDepot for each Depot 
+        start_depots = {min(depot_list) for depot_list in self.timed_depots_by_depot.values()}
+        end_depots = {max(depot_list) for depot_list in self.timed_depots_by_depot.values()}
+
+        arcs_by_timed_depot: dict[TimedDepot, list[Arc]] = defaultdict(list[Arc])
+        for f_id, flow in solution_fragment_ids:
+            # Retrieve the timed depot it starts and ends at
+            start_depot, end_depot = self.timed_depots_by_fragment_id[f_id].start, self.timed_depots_by_fragment_id[f_id].end
+            arcs_by_timed_depot[start_depot].append(Arc(start_depot=start_depot, end_depot=end_depot, f_id=f_id, flow=flow))     
+            if start_depot not in start_depots:
+                continue
+            # Decompress the network such that a min heap on time is real. 
+            # To do this, we need to map these depots back to their true time.
+            fragment = self.fragments_by_id[f_id]
+            uncompressed_end_depot = TimedDepot(time=fragment.end_time, id=fragment.end_depot_id)
+            
+            start_label = Label(
+                    flow=flow,
+                    prev_label=Label(
+                        uncompressed_end_depot=uncompressed_end_depot,
+                        end_depot=start_depot,
+                        prev_label=None,
+                        flow=flow,
+                        f_id=None,
+                    ),
+                    end_depot=end_depot,
+                    f_id=f_id, 
+                    uncompressed_end_depot=uncompressed_end_depot
+                )
+            heapq.heappush(
+                label_heap,
+                start_label 
+            )
+
+        # Add any start labels
+        for start_depot, end_depot, flow in waiting_arcs:
+            arcs_by_timed_depot[start_depot].append(
+                Arc(start_depot=start_depot, end_depot=end_depot, f_id=None, flow=flow)
+            )     
+            
+            if start_depot not in start_depots:
+                continue
+
+            start_label = Label(uncompressed_end_depot=start_depot, flow=flow, end_depot=start_depot, prev_label=None, f_id=None)
+            heapq.heappush(
+                label_heap, 
+                Label(uncompressed_end_depot=start_depot, flow=flow, prev_label=start_label, end_depot=end_depot, f_id=None)
+            )
+
+        while len(label_heap) != 0:
+            label = heapq.heappop(label_heap)
+            label_flow = label.flow
+            arcs = arcs_by_timed_depot[label.end_depot]
+            if len(arcs) == 0:
+                if label.end_depot not in end_depots:
+                    raise Exception("Route ends before the last depot time - very bad:(")
+                # assemble the route backwards
+                route = []
+                while label.prev_label is not None:
+                    route.append(label.end_depot)
+                    if label.f_id is not None:
+                        route.append(self.fragments_by_id[label.f_id])
+                    label = label.prev_label
+                route.append(label.end_depot)
+                routes.append(Route(route_list=route[::-1]))
+            #TODO: MAKE THIS A WHILE LOOP to remove expended arcs in place. 
+            for i, arc in enumerate(arcs):
+                if arc.flow < EPS:
+                    continue
+                delta = min(arc.flow, label_flow)
+                uncompressed_end_depot = arc.end_depot
+
+                if arc.f_id is not None:
+                    fragment = self.fragments_by_id[arc.f_id]
+                    uncompressed_end_depot = TimedDepot(time=fragment.end_time, id=fragment.end_depot_id)
+                heapq.heappush(
+                    label_heap,
+                    Label(
+                        uncompressed_end_depot=uncompressed_end_depot,
+                        end_depot=arc.end_depot,
+                        prev_label=label,
+                        flow=delta,
+                        f_id=arc.f_id
+                    )
+                )
+
+                # Decrement flow on the arc and the label
+                arc.flow -= delta
+                label_flow -= delta
+                
+                if label_flow < EPS:
+                    break
+        return routes                  
 
     def convert_solution_to_fragments(self, instance_type:str=None, sheet_name=None) -> tuple[list[list[int]], list[str]]:
         """Reads the solution given by the paper into a list of their routes which has waiting arcs and fragments."""

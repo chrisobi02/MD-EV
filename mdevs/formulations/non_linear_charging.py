@@ -3,7 +3,6 @@ import math
 import time as timer
 
 from mdevs.formulations.base import *
-from mdevs.formulations.base import Fragment, TimedDepot
 
 class NonLinearFragmentGenerator(BaseFragmentGenerator):
     def __init__(self, file: str, config: dict = {}):
@@ -60,8 +59,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         for next_job in self.jobs:
             # Filter out jobs already covered
             if job == next_job:
-                continue
-            if any(next_job == prev_job for prev_job in current_sequence):
                 continue
 
             # 1.

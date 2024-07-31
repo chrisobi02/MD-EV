@@ -1,8 +1,0 @@
-\ Model fragment_network_copy
-\ LP format - for model browsing. Use MPS format to capture full model detail.
-Minimize
- 
-Subject To
- job_0: = 1
-Bounds
-End

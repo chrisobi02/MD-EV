@@ -46,7 +46,7 @@ def compare_sequencing_procedures():
             
             params = {"UNDISCRETISED_MAX_CHARGE": 100}
             try:
-                generator = ConstantFragmentGenerator(json_file)
+                generator = ConstantTimeFragmentGenerator(json_file)
                 # ip = NaiveIP(json_file, params=params)
                 generator.run()#file=str_frag_file)
                 result = {"Jobs": len(generator.jobs), "Depots": len(generator.depots)}
@@ -133,6 +133,7 @@ def constant_time_debug():
 
 @cli.command()
 def non_linear_debug():
+   
     click.echo("Running non-linear debug")
       # Specify the directory you want to search
     directory = "mdevs/data/instances_large/"
@@ -147,16 +148,119 @@ def non_linear_debug():
         if "fragments" in str(json_file):
             continue
         print(f"Solving {json_file}...")
-        model = NonLinearFragmentGenerator(json_file, config={"RECHARGE_TIME": 0.5})
+        model = NonLinearFragmentGenerator(json_file, config={"RECHARGE_TIME_IN_MINUTES": 0.5})
         model.run()
         model.create_routes()
         continue
 
-cli.add_command(non_linear_debug)
+# @cli.command()
+# @click.option("--size", type=str, default="50")
+def constant_time_single(size: str):
+    directory = "mdevs/data/instances_large/"
+    directory = "mdevs/data/instances_regular/"
+    for directory in ["mdevs/data/instances_regular/", "data/instances_large/"]:
+        # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
+        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
+        EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
+        # Iterate over the list of filepaths & open each file
+        for json_file in json_files:     
+            if "fragments" in str(json_file):
+                continue        
+            if size not in str(json_file):
+                continue
+            generator = ConstantTimeFragmentGenerator(json_file)
+            generator.generate_fragments()#file=str_frag_file)
+            generator.generate_timed_network()
+            generator.validate_timed_network()
+            print("building model...")
+            generator.model.setParam("OutputFlag", 0)
+            generator.build_model()
+            print("solving...")
+            generator.solve()
+            print("sequencing routes...")
+            routes = generator.forward_label()
+            print(f"Fragment routes: {len(routes)}")
+            generator.validate_solution([r.route_list for r in routes], generator.model.objval)
+            with open(f"mdevs/data/results/constant_run/{generator.data['label']}.json", "r") as f:
+                assert generator.model.objval == json.load(f)["objective"]
+                print(f"instance {generator.data['label']} passed")
+                
+            # result_json = {
+            #     "label": json_file.split("/")[-1].split(".")[0],
+            #     "method": "constant_time",
+            # } | generator.statistics
+            # json.dump(result_json, open(f"data/results/constant_run/{generator.data['label']}.json", "w"))
+            pass
+
+@cli.command()
+def constant_time_run():
+    directory = "mdevs/data/instances_large/"
+    directory = "mdevs/data/instances_regular/"
+    for directory in ["data/instances_regular/", "data/instances_large/"]:
+        # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
+        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
+        EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
+        # Iterate over the list of filepaths & open each file
+        for json_file in json_files:     
+            if "fragments" in str(json_file):
+                continue        
+            generator = ConstantTimeFragmentGenerator(json_file)
+            generator.generate_fragments()#file=str_frag_file)
+            generator.generate_timed_network()
+            generator.validate_timed_network()
+            print("building model...")
+            generator.model.setParam("OutputFlag", 0)
+            generator.build_model()
+            print("solving...")
+            generator.solve()
+            print("sequencing routes...")
+            routes = generator.forward_label()
+            print(f"Fragment routes: {len(routes)}")
+            generator.validate_solution([r.route_list for r in routes], generator.model.objval)
+            result_json = {
+                "label": json_file.split("/")[-1].split(".")[0],
+                "method": "constant_time",
+            } | generator.statistics
+            json.dump(result_json, open(f"data/results/constant_run/{generator.data['label']}.json", "w"))
+
+@cli.command()
+def constant_time_naive_ip_run():
+    directory = "mdevs/data/instances_large/"
+    directory = "mdevs/data/instances_regular/"
+    for directory in ["data/instances_regular/"]:
+    # for directory in ["data/instances_regular/", "data/instances_large/"]:
+        # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
+        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
+        EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
+        # Iterate over the list of filepaths & open each file
+        for json_file in json_files:     
+            if "fragments" in str(json_file):
+                continue
+
+            generator = NaiveIP(json_file)
+            # generator.model.setParam("OutputFlag", 0)\
+            print(f"solving {json_file}")
+            generator.run()
+            print("sequencing routes...")
+            routes = generator.sequence_routes()
+            print(f"Fragment routes: {len(routes)}")
+            # generator.validate_solution([r.route_list for r in routes], generator.model.objval)
+            result_json = {
+                "label": json_file.split("/")[-1].split(".")[0],
+                "method": "constant_time",
+            } | generator.statistics
+            json.dump(result_json, open(f"data/results/naive_ip_constant_run/{generator.data['label']}.json", "w"))
+            
+# cli.add_command(constant_time_single)
+# cli.add_command(constant_time_run)
+# cli.add_command(non_linear_debug)
+# cli.add_command(constant_time_naive_ip_run)
+
 
 if __name__ == "__main__":
+    constant_time_single("200")
     # cli()
-    non_linear_debug()
-    # constant_time_debug()
+    # non_linear_debug()
+    # constant_time_naive_ip_run()
     # compare_sequencing_procedures()
     # non_linear_debug()

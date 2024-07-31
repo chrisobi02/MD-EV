@@ -24,6 +24,7 @@ class NaiveIP(BaseMDEVCalculator):
     This is used for validation of fragment solutions
     For parity with the paper, the job indices are offset by the number of depots.
     """
+    TYPE = "constant-charging"
     def __init__(self, file: str, params: dict = {}):
         super().__init__(file, config=params)
         self.locations = self.depots + self.jobs
@@ -70,8 +71,10 @@ class NaiveIP(BaseMDEVCalculator):
         - state of charge skipping a depot.
         We then store the maximum for each charge level.
         """
+        time0 = time.time()
         self.max_charge_by_loc_pair_charge: dict[tuple[int, int, int], int] = {}
         self.min_charge_by_loc_pair: dict[tuple[int, int], int] = {}
+        
         for start, end in product(self.locations, self.locations):
             # compute the largest charge achievable between these two locations
             if isinstance(end, Building):
@@ -90,7 +93,7 @@ class NaiveIP(BaseMDEVCalculator):
                 detour for detour in self.depots 
                 if (
                     start.end_time + self.time_matrix[start.offset_id][detour.offset_id] 
-                    + self.config.RECHARGE_TIME + self.time_matrix[detour.offset_id][end.offset_id] 
+                    + self.config.RECHARGE_TIME_IN_MINUTES + self.time_matrix[detour.offset_id][end.offset_id] 
                     <= end.start_time
                 )
             ]
@@ -115,8 +118,9 @@ class NaiveIP(BaseMDEVCalculator):
                 if max_charge == UNREACHABLE:
                     break
             
-            for charge in self.charge_levels[len(self.charge_levels) - i - 1:]:
+            for charge in self.charge_levels[:len(self.charge_levels) - i - 1]:
                 self.max_charge_by_loc_pair_charge[start, end, charge] = UNREACHABLE
+        self.statistics["charge_level_generation"] = time.time() - time0
 
     def generate_model(self) -> Model:
         """Generates the MIP model."""
@@ -219,6 +223,14 @@ class NaiveIP(BaseMDEVCalculator):
             self.model.computeIIS()
             self.model.write("IP.ilp")
         else:
+            self.statistics.update(
+                {
+                    "objective": self.model.objval,
+                    "runtime": self.model.Runtime,
+                    "node_count": self.model.NodeCount,
+                    "gap": self.model.MIPGap,
+                }
+            )
             print(f"Solved, objective: {self.model.objVal}")
     
     def run(self, sol=None):
@@ -269,10 +281,10 @@ class NaiveIP(BaseMDEVCalculator):
                         break
         
         complete_routes = []
-        for seq in job_sequences:
-            # Include start depot
-            curr_route = seq[:1]
-            charge = self.config.MAX_CHARGE - self.charge_matrix[seq[0].offset_id][seq[1].offset_id]
+        # for seq in job_sequences:
+        #     # Include start depot
+        #     curr_route = seq[:1]
+        #     charge = self.config.MAX_CHARGE - self.charge_matrix[seq[0].offset_id][seq[1].offset_id]
 
             # for start, end in zip(seq[1:], seq[2:]):
             #     # Check if can do a recharge and reach it in time

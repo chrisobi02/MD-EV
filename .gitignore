@@ -1,6 +1,9 @@
 # fragment files are too big
-data/**/fragments
+mdevs/data/**/fragments
 .vscode
+
+# Gurobi
+*.ilp
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -81,6 +84,7 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
 
 # IPython
 profile_default/
