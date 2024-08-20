@@ -47,9 +47,9 @@ def visualise_map(data: dict):
 
 
 def visualise_timed_network(
-    timed_depots: list[TimedDepot],
-    vehicle_arcs: list[tuple[TimedDepot, TimedDepot]],
-    waiting_arcs: list[dict[str, int | tuple[TimedDepot, TimedDepot]]],
+    timed_depots: list[ChargeDepot],
+    vehicle_arcs: list[tuple[ChargeDepot, ChargeDepot]],
+    waiting_arcs: list[dict[str, int | tuple[ChargeDepot, ChargeDepot]]],
     **kwargs
 ) -> go.Figure:
     fig = go.Figure()
@@ -138,16 +138,16 @@ def visualise_timed_network(
     pass
 
 def visualise_routes(
-        routes: list[TimedDepot | tuple[TimedDepot, TimedDepot]], 
-        timed_depots: list[TimedDepot],
+        routes: list[ChargeDepot | tuple[ChargeDepot, ChargeDepot]], 
+        timed_depots: list[ChargeDepot],
     ) -> go.Figure:
     fig = go.Figure()
     # Choose len(routes) colors from the color palette
     colors = px.colors.qualitative.Alphabet
 
     for i, route in enumerate(routes):
-        route = [td for td in route if isinstance(td, TimedDepot)]
-        # timed_depots = [td for td in routes if isinstance(td, TimedDepot)]
+        route = [td for td in route if isinstance(td, ChargeDepot)]
+        # timed_depots = [td for td in routes if isinstance(td, ChargeDepot)]
         # vehicle_arcs = [td for td in routes if isinstance(td, tuple)]
         route_path_x = [td.time for td in route]
         route_path_y = [td.id for td in route]
@@ -172,6 +172,167 @@ def visualise_routes(
         )
     )
     
+    return fig
+
+def visualise_charge_network(
+    charge_depots: list[ChargeDepot],
+    vehicle_arcs: list[tuple[ChargeDepot, ChargeDepot]],
+    waiting_arcs: set[ChargeDepotStore],
+    new_charge_depots: list[ChargeDepot],
+    new_vehicle_arcs: list[tuple[ChargeDepot, ChargeDepot]],
+    new_waiting_arcs: set[ChargeDepotStore],
+    **kwargs
+) -> go.Figure:
+    fig = go.Figure()
+    graph_labels=dict(
+        xaxis=dict(title='Time'),
+        yaxis=dict(title='ID'),
+        zaxis=dict(title='Charge'),
+    )
+
+    graph_arc_x = []
+    graph_arc_y = []
+    graph_arc_z = []
+
+    for start, end in vehicle_arcs:
+        if start.id == end.id and start.charge == end.charge:
+            arc_x = (start.time, (start.time+end.time)/2, end.time)
+            arc_y = (start.id, start.id + 0.5, end.id)
+            arc_z = (start.charge, (3*start.charge+end.charge)/2, end.charge)
+        else:
+            arc_x = (start.time, end.time)
+            arc_y = (start.id, end.id)
+            arc_z = (start.charge, end.charge)
+        graph_arc_x.extend([*arc_x,  None])
+        graph_arc_y.extend([*arc_y, None])
+        graph_arc_z.extend([*arc_z, None])
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=graph_arc_x,
+            y=graph_arc_y,
+            z=graph_arc_z,
+            mode="lines",
+            marker=dict(size=10, color="blue"),
+            line=dict(width=0.5),#, color='#888'),
+            name="Vehicle Arcs",
+            **kwargs
+        )
+    )
+
+    waiting_arc_x = []
+    waiting_arc_y = []
+    waiting_arc_z = []
+
+    for arc in waiting_arcs:
+        start, end = arc.start, arc.end
+        waiting_arc_x.extend([start.time, end.time, None])
+        waiting_arc_y.extend([start.id, end.id, None])
+        waiting_arc_z.extend([start.charge, end.charge, None])
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=waiting_arc_x,
+            y=waiting_arc_y,
+            z=waiting_arc_z,
+            mode="lines",
+            # line=dict(width=0.5, color='#888'),
+            # marker=dict(size=10, color="red"),
+            name="Waiting Arcs",
+         
+        )
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=[t.time for t in charge_depots],
+            y=[t.id for t in charge_depots],
+            z=[t.charge for t in charge_depots],
+            mode="markers",
+            marker=dict(size=10, color="green"),
+            name="Timed Depots",
+            **kwargs,
+        )
+    )
+
+    
+    # New vehicle arcs
+    new_graph_arc_x = []
+    new_graph_arc_y = []
+    new_graph_arc_z = []
+
+    for start, end in new_vehicle_arcs:
+        if start.id == end.id and start.charge == end.charge:
+            arc_x = (start.time, (start.time + end.time) / 2, end.time)
+            arc_y = (start.id, start.id + 0.5, end.id)
+            arc_z = (start.charge, (3 * start.charge + end.charge) / 2, end.charge)
+        else:
+            arc_x = (start.time, end.time)
+            arc_y = (start.id, end.id)
+            arc_z = (start.charge, end.charge)
+        new_graph_arc_x.extend([*arc_x, None])
+        new_graph_arc_y.extend([*arc_y, None])
+        new_graph_arc_z.extend([*arc_z, None])
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=new_graph_arc_x,
+            y=new_graph_arc_y,
+            z=new_graph_arc_z,
+            mode="lines",
+            marker=dict(size=10, color="purple"),
+            line=dict(width=0.5),
+            name="New Vehicle Arcs",
+            **kwargs
+        )
+    )
+
+    # New waiting arcs
+    new_waiting_arc_x = []
+    new_waiting_arc_y = []
+    new_waiting_arc_z = []
+
+    for arc in new_waiting_arcs:
+        start, end = arc.start, arc.end
+        new_waiting_arc_x.extend([start.time, end.time, None])
+        new_waiting_arc_y.extend([start.id, end.id, None])
+        new_waiting_arc_z.extend([start.charge, end.charge, None])
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=new_waiting_arc_x,
+            y=new_waiting_arc_y,
+            z=new_waiting_arc_z,
+            mode="lines",
+            name="New Waiting Arcs",
+        )
+    )
+
+    # New charge depots
+    fig.add_trace(
+        go.Scatter3d(
+            x=[t.time for t in new_charge_depots],
+            y=[t.id for t in new_charge_depots],
+            z=[t.charge for t in new_charge_depots],
+            mode="markers",
+            marker=dict(size=10, color="orange"),
+            name="New Timed Depots",
+            **kwargs,
+        )
+    )
+
+    # Add a title
+    fig.update_layout(
+        go.Layout(
+            scene=dict(
+                xaxis=dict(title='Time'),
+                yaxis=dict(title='ID'),
+                zaxis=dict(title='Charge'),
+            ),
+            title_text=f"Charge Network for {kwargs.get('instance_label', '##')}, type: {kwargs.get('charge_type', 'N/A')}", 
+        )
+    )
+    # fig.show()
+
     return fig
 
 if __name__ == "__main__":

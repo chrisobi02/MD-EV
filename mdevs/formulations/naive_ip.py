@@ -93,7 +93,7 @@ class NaiveIP(BaseMDEVCalculator):
                 detour for detour in self.depots 
                 if (
                     start.end_time + self.time_matrix[start.offset_id][detour.offset_id] 
-                    + self.config.RECHARGE_TIME_IN_MINUTES + self.time_matrix[detour.offset_id][end.offset_id] 
+                    + self.config.RECHARGE_DELAY_IN_MINUTES + self.time_matrix[detour.offset_id][end.offset_id] 
                     <= end.start_time
                 )
             ]

@@ -1,7 +1,10 @@
 # fragment files are too big
 mdevs/data/**/fragments
 .vscode
+notebooks/
+*.html
 
+*.prof
 # Gurobi
 *.ilp
 

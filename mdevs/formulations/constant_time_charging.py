@@ -42,7 +42,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
 
             recharge_time = min(
                 self.job_to_depot_time_matrix[job.id][depot.id]
-                + self.config.RECHARGE_TIME_IN_MINUTES
+                + self.config.CHARGE_BUFFER
                 + self.depot_to_job_time_matrix[depot.id][next_job.id]
                 for depot in self.depots
                 if self.job_to_depot_charge_matrix[job.id][depot.id] <= charge
@@ -59,14 +59,12 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         """Creates the compressed time network for the current instance."""
         time0 = time.time()
         self.timed_fragments_by_depot_by_time = defaultdict(lambda: defaultdict(set[TimedFragment]))
-        self.timed_fragment_by_id: dict[int, set[TimedFragment]] = {}
-        self.timed_depots_by_fragment_id: dict[int, TimedDepotStore] = defaultdict(TimedDepotStore)
         for fragment in self.fragment_set:
             arrival_frag = TimedFragment(id=fragment.id, time=fragment.end_time, direction=Flow.ARRIVAL)
             departure_frag = TimedFragment(id=fragment.id, time=fragment.start_time, direction=Flow.DEPARTURE)
             self.timed_fragments_by_depot_by_time[fragment.end_depot_id][fragment.end_time].add(arrival_frag)
             self.timed_fragments_by_depot_by_time[fragment.start_depot_id][fragment.start_time].add(departure_frag)
-            self.timed_fragment_by_id[fragment.id] = [arrival_frag, departure_frag]
+        
         self.statistics.update(
             {
                 "timed_network_generation": time.time() - time0,
@@ -75,8 +73,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         )
         
         time0 = time.time()
-        self.timed_nodes: set[TimedDepot] = set()
-        timed_depots_by_depot = defaultdict(set[TimedDepot])
+        charge_depots_by_depot = defaultdict(set[ChargeDepot])
 
         for depot_id in self.depots_by_id:
             times_for_depot: list[int] = list(self.timed_fragments_by_depot_by_time[depot_id].keys())
@@ -106,43 +103,67 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                         current_fragments.update(timed_fragments)
 
                     case (Flow.DEPARTURE, Flow.ARRIVAL):
-                        timed_depot = TimedDepot(id=depot_id, time=curr_time)
+                        timed_depot = ChargeDepot(id=depot_id, time=curr_time, charge=self.config.MAX_CHARGE)
                         
-                        timed_depots_by_depot[depot_id].add(timed_depot)
+                        charge_depots_by_depot[depot_id].add(timed_depot)
                         for tf in current_fragments:
+                            charge_fragment = ChargeFragment.from_fragment(
+                                self.config.MAX_CHARGE, self.fragments_by_id[tf.id]
+                            )
                             if tf.direction == Flow.DEPARTURE:
-                                self.timed_depots_by_fragment_id[tf.id].start = timed_depot
+                                self.charge_depots_by_charge_fragment[charge_fragment].start = timed_depot
                             else:
-                                self.timed_depots_by_fragment_id[tf.id].end = timed_depot
+                                self.charge_depots_by_charge_fragment[charge_fragment].end = timed_depot
 
-                        self.timed_fragments_by_timed_depot[timed_depot].update(current_fragments)
+                        self.timed_fragments_by_charge_depot[timed_depot].update(current_fragments)
                         current_fragments = timed_fragments
                 
                 previous_direction = current_direction if not has_both_directions else Flow.DEPARTURE
 
             # Add the last nodes into the model
-            timed_depot = TimedDepot(id=depot_id, time=curr_time)
-            timed_depots_by_depot[depot_id].add(timed_depot)
+            timed_depot = ChargeDepot(id=depot_id, time=curr_time, charge=self.config.MAX_CHARGE)
+            charge_depots_by_depot[depot_id].add(timed_depot)
             for tf in current_fragments:
+                charge_fragment = ChargeFragment.from_fragment(
+                    self.config.MAX_CHARGE, self.fragments_by_id[tf.id]
+                )
                 if tf.direction == Flow.DEPARTURE:
-                    self.timed_depots_by_fragment_id[tf.id].start = timed_depot
+                    self.charge_depots_by_charge_fragment[charge_fragment].start = timed_depot
                 else:
-                    self.timed_depots_by_fragment_id[tf.id].end = timed_depot
-            self.timed_fragments_by_timed_depot[timed_depot].update(current_fragments)
-            self.timed_depots_by_depot = {
+                    self.charge_depots_by_charge_fragment[charge_fragment].end = timed_depot
+            
+            self.timed_fragments_by_charge_depot[timed_depot].update(current_fragments)
+            self.charge_depots_by_depot = {
                 depot_id: sorted(timed_depots)
-                for depot_id, timed_depots in timed_depots_by_depot.items()
+                for depot_id, timed_depots in charge_depots_by_depot.items()
             }
+    
+        # Create the recharge arcs
+        for depot in self.charge_depots_by_depot:
+            for start, end in zip(self.charge_depots_by_depot[depot], self.charge_depots_by_depot[depot][1:]):
+                arc = FrozenChargeDepotStore(start=start, end=end)
+                self.recharge_arcs_by_charge_depot[start].add(arc)
+                self.recharge_arcs_by_charge_depot[end].add(arc)
+    
+        self.recharge_arcs = set.union(self.recharge_arcs_by_charge_depot.values())
+        
+        self.all_arcs_by_charge_depot: dict[ChargeDepot, set[FrozenChargeDepotStore | ChargeFragment]] = {
+            charge_depot: set(
+                *self.recharge_arcs_by_charge_depot[charge_depot], *self.timed_fragments_by_charge_depot[charge_depot]
+            )
+            for depot in self.charge_depots_by_depot for charge_depot in self.charge_depots_by_depot[depot] 
+        }
+
         self.statistics.update(
             {
                 "timed_network_compression": time.time() - time0,
-                "compressed_network_nodes": sum(len(v) for v in self.timed_depots_by_depot.values()),
+                "compressed_network_nodes": sum(len(v) for v in self.charge_depots_by_depot.values()),
             } 
         )       
     
     def get_validated_timed_solution(
             self, solution: list[list[int]], expected_vehicles: int | None=None
-        ) -> list[list[TimedDepot | Fragment]]:
+        ) -> list[list[ChargeDepot | Fragment]]:
         """
         Validates the prior solution to ensure its feasbility.
         Converts a list of fragments which form a route into its consequent Timed Depot/Fragment, 
@@ -159,13 +180,13 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
             for i, f_id in enumerate(fragments):
                 fragment = self.fragments_by_id[f_id]
                 # Get start/end 
-                s_td, e_td = self.timed_depots_by_fragment_id[f_id].start, self.timed_depots_by_fragment_id[f_id].end
+                s_td, e_td = self.charge_depots_by_charge_fragment[f_id].start, self.charge_depots_by_charge_fragment[f_id].end
                 if i == 0:
                     # Add start -> first fragment waiting arcs, then between each pair:
-                    waiting_gaps = sorted([td for td in self.timed_depots_by_depot[s_td.id] if td < s_td])
+                    waiting_gaps = sorted([td for td in self.charge_depots_by_depot[s_td.id] if td < s_td])
                 else:
                     # Fill any waiting gaps between the previous and now
-                    waiting_gaps = [td for td in self.timed_depots_by_depot[s_td.id] if prev_td < td < s_td]
+                    waiting_gaps = [td for td in self.charge_depots_by_depot[s_td.id] if prev_td < td < s_td]
                 converted_route.extend(waiting_gaps)
 
                 if s_td not in converted_route:
@@ -175,7 +196,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                 new_depots = []
                 if i == len(fragments) - 1:
                     # Fill until end
-                    new_depots = [td for td in self.timed_depots_by_depot[fragment.end_depot_id] if e_td < td]                
+                    new_depots = [td for td in self.charge_depots_by_depot[fragment.end_depot_id] if e_td < td]                
                     converted_route.extend(new_depots)
                 prev_td = e_td
             final_routes.append(converted_route)
@@ -187,11 +208,11 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
 
     def get_fragments_from(
             self, 
-            start: TimedDepot,
+            start: ChargeDepot,
             current_route: list, 
-            fragments_by_timed_depot: dict[TimedDepot, set[tuple[TimedDepot, int]]], 
-            flow_by_waiting_arc_start: dict[TimedDepot, dict[TimedDepot, int]]
-        ) -> list[Fragment | TimedDepot]:
+            fragments_by_timed_depot: dict[ChargeDepot, set[tuple[ChargeDepot, int]]], 
+            flow_by_waiting_arc_start: dict[ChargeDepot, dict[ChargeDepot, int]]
+        ) -> list[Fragment | ChargeDepot]:
         """Traverse the waiting arcs and fragments to get the route from a given start depot."""
 
         if len(fragments_by_timed_depot[start]) != 0:
@@ -208,20 +229,21 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         self.get_fragments_from(next_depot, current_route, fragments_by_timed_depot, flow_by_waiting_arc_start)
         return current_route
 
-    def create_routes(self) -> list[list[TimedDepot | Fragment]]:
+    def create_routes(self) -> list[list[ChargeDepot | Fragment]]:
         """
         Sequences a set of fragments into complete routes for the job horizon.
         If it is unable to sequence them, it says something
         """
-        solution_fragment_ids = {f for f in self.fragment_vars_by_id if self.fragment_vars_by_id[f].x > 0.5}
+        raise DeprecationWarning("This method is deprecated, use forward_label method instead.")
+        solution_fragment_ids = {f for f in self.fragment_vars_by_charge_fragment if self.fragment_vars_by_charge_fragment[f].x > 0.5}
         # Sequence fragments by their start / end depots
-        waiting_arcs = [(start, end, round(self.waiting_arcs[start, end].x)) for start, end in self.waiting_arcs if self.waiting_arcs[start, end].x > 0.5]
+        waiting_arcs = [(start, end, round(self.recharge_arc_var_by_depot_store[start, end].x)) for start, end in self.recharge_arc_var_by_depot_store if self.recharge_arc_var_by_depot_store[start, end].x > 0.5]
 
         routes = []
-        fragments_by_timed_depot: dict[TimedDepot, set[tuple[TimedDepot, int]]] = defaultdict(set[tuple])
+        fragments_by_timed_depot: dict[ChargeDepot, set[tuple[ChargeDepot, int]]] = defaultdict(set[tuple])
         for f_id in solution_fragment_ids:
-            # Retrieve the timeddepot it starts and ends at
-            start_depot, end_depot = self.timed_depots_by_fragment_id[f_id].start, self.timed_depots_by_fragment_id[f_id].end
+            # Retrieve the ChargeDepot it starts and ends at
+            start_depot, end_depot = self.charge_depots_by_charge_fragment[f_id].start, self.charge_depots_by_charge_fragment[f_id].end
             fragments_by_timed_depot[start_depot].add((end_depot, f_id))
 
         # Set up the waiting arc counts
@@ -233,7 +255,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         # get the starting points for all routes: the first timed depot of each type (+ waiting arcs?)
         # for each depot's start point, start tracing a path until you hit a timed depot with no further connections.
         # if you hit a depot with no further connections, start a new route.
-        for depot_id, timed_depots in self.timed_depots_by_depot.items():
+        for depot_id, timed_depots in self.charge_depots_by_depot.items():
             start_depot = min(timed_depots)
             # Following fragments
             while len(fragments_by_timed_depot[start_depot]) != 0 or len(flow_by_waiting_arc_start[start_depot]) != 0:
@@ -244,51 +266,57 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
     def add_flow_balance_constraints(self):
         """Adds a flow balance constraint at eveery node in the network."""
         self.flow_balance = {}
-        for depot in self.timed_depots_by_depot:
-            for idx, timed_depot in enumerate(self.timed_depots_by_depot[depot]):
+        for depot in self.charge_depots_by_depot:
+            for idx, timed_depot in enumerate(self.charge_depots_by_depot[depot]):
                 name = f"flow_{str(timed_depot)}"
                 if idx == 0:
                     constr = self.model.addConstr(
                         self.starting_counts[depot]
                         == quicksum(
-                            self.fragment_vars_by_id[tf.id]
-                            for tf in self.timed_fragments_by_timed_depot[timed_depot]
+                            self.fragment_vars_by_charge_fragment[
+                                ChargeFragment.from_fragment(self.config.MAX_CHARGE, self.fragments_by_id[tf.id])
+                            ]
+                            for tf in self.timed_fragments_by_charge_depot[timed_depot]
                         )
-                        + self.waiting_arcs[
-                            timed_depot, self.timed_depots_by_depot[depot][1]
+                        + self.recharge_arc_var_by_depot_store[
+                            timed_depot, self.charge_depots_by_depot[depot][1]
                         ],
                         name=name,
                     )
 
-                elif idx == len(self.timed_depots_by_depot[depot]) - 1:
+                elif idx == len(self.charge_depots_by_depot[depot]) - 1:
                     constr = self.model.addConstr(
                         self.finishing_counts[depot]
                         == quicksum(
-                            self.fragment_vars_by_id[tf.id]
-                            for tf in self.timed_fragments_by_timed_depot[timed_depot]
+                            self.fragment_vars_by_charge_fragment[
+                                ChargeFragment.from_fragment(self.config.MAX_CHARGE, self.fragments_by_id[tf.id])
+                            ]
+                            for tf in self.timed_fragments_by_charge_depot[timed_depot]
                         )
-                        + self.waiting_arcs[
-                            self.timed_depots_by_depot[depot][-2], timed_depot
+                        + self.recharge_arc_var_by_depot_store[
+                            self.charge_depots_by_depot[depot][-2], timed_depot
                         ],
                         name=name,
                     )
                 else:
-                    next_timed_depot = self.timed_depots_by_depot[depot][idx + 1]
-                    previous_timed_depot = self.timed_depots_by_depot[depot][idx - 1]
+                    next_timed_depot = self.charge_depots_by_depot[depot][idx + 1]
+                    previous_timed_depot = self.charge_depots_by_depot[depot][idx - 1]
                     constr = self.model.addConstr(
                         quicksum(
-                            (1 - 2*(tf.direction == Flow.DEPARTURE))*self.fragment_vars_by_id[tf.id]
-                            for tf in self.timed_fragments_by_timed_depot[timed_depot]
+                            (1 - 2*(tf.direction == Flow.DEPARTURE))*self.fragment_vars_by_charge_fragment[
+                                ChargeFragment.from_fragment(self.config.MAX_CHARGE, self.fragments_by_id[tf.id])
+                            ]
+                            for tf in self.timed_fragments_by_charge_depot[timed_depot]
                         )
-                        + self.waiting_arcs[previous_timed_depot, timed_depot] 
-                        - self.waiting_arcs[timed_depot, next_timed_depot]
+                        + self.recharge_arc_var_by_depot_store[previous_timed_depot, timed_depot] 
+                        - self.recharge_arc_var_by_depot_store[timed_depot, next_timed_depot]
                         == 0,
                         name=name,
                     )
 
                 self.flow_balance[timed_depot] = constr
 
-    def validate_route(self, route: list[TimedDepot | Fragment]) -> bool:
+    def validate_route(self, route: list[ChargeDepot | Fragment]) -> bool:
         """
         Validates a route to ensure it is feasible.
         For a route to be feasible, it must:
@@ -300,7 +328,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         prev_time = 0
         # print("validating the following:")
         for i, location in enumerate(route):
-            if isinstance(location, TimedDepot):
+            if isinstance(location, ChargeDepot):
                 # ensure timed depots connect to the correct start fragment
                 charge = self.config.MAX_CHARGE
                 if prev_time > location.time:
@@ -308,10 +336,13 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                     raise Exception()
                 
             elif isinstance(location, Fragment):
-                charge, prev_time = self.validate_fragment(location, charge, prev_time)
+                charge, prev_time, is_valid = self.validate_fragment(location, charge, prev_time)
+                if not is_valid:
+                    print(f"Fragment {location} is invalid.")
+                    return False
         return True
 
-    def validate_solution(self, routes: list[list[TimedDepot | TimedFragment]], objective: int, triangle_inequality: bool=True):
+    def validate_solution(self, routes: list[list[ChargeDepot | TimedFragment]], objective: int, triangle_inequality: bool=True):
         """
         Validates the input solution routes to ensure they are feasible.
         For a solution to be feasible:
@@ -321,6 +352,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         """
         # all jobs must be served
         covered_jobs = {job for r in routes for f in r if isinstance(f, Fragment) for job in f.jobs}
+        assert len(routes) == objective, f"Objective value {objective} does not match number of routes {len(routes)}"
         assert (
             covered_jobs == set(self.jobs), 
             f"All jobs must be served in the solution, missing {set(self.jobs).difference(covered_jobs)}"
@@ -336,7 +368,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         if triangle_inequality:
             self.validate_job_sequences(routes)
     
-    def validate_job_sequences(self, routes: list[list[TimedDepot | Fragment]]):
+    def validate_job_sequences(self, routes: list[list[ChargeDepot | Fragment]]):
         """
         Validates no job sequenecs A - B - C occur such that A - C is illegal.
         """

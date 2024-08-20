@@ -5,6 +5,7 @@ import pandas as pd
 import glob
 import click
 from mdevs.formulations import *
+import cProfile
 
 @click.group()
 def cli():
@@ -31,7 +32,7 @@ def compare_sequencing_procedures():
             # if "I-3-3-100-08" not in str(json_file):
             #     continue
             # # if "50" not in str(json_file):
-            #     continue
+                # continue
             print(f"Solving {json_file}...")
             print("generating fragments...")
             # remove the last /, append fragments and then the part on the other side f the slice
@@ -70,8 +71,8 @@ def compare_sequencing_procedures():
 
 def constant_time_debug():
     # Specify the directory you want to search
-    directory = "data/instances_regular/"
     directory = "data/instances_large/"
+    directory = "mdevs/data/instances_regular/"
 
     # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
     json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
@@ -95,7 +96,7 @@ def constant_time_debug():
         # prev_runs = pd.read_csv("large_results.csv")
         # if frag_file[-1].split(".")[0] in prev_runs[prev_runs["method"] == "fragments"]["label"].values:
         #     continue
-        generator = ConstantFragmentGenerator(json_file)
+        generator = ConstantTimeFragmentGenerator(json_file)
         violations = generator.validate_triangle_inequality()
         
         str_frag_file = "/".join(frag_file[:-1]) + "/fragments/" + "f-" + frag_file[-1]
@@ -123,21 +124,20 @@ def constant_time_debug():
         generator.solve()
         # print(f"Prior Solution: {len(solution_routes)}")
         print("sequencing routes...")
-        generator.routes = routes = generator.create_routes()
+        # generator.routes = routes = generator.create_routes()
         new_routes = generator.forward_label()
         # generator.visualise_routes([r.route_list for r in new_routes])
-        print(f"Fragment routes: {len(routes)}, {len(new_routes)}")
+        print(f"Fragment routes: {len(new_routes)}")
         print(sum(len(r.jobs) for r in new_routes))
         routess = [r.route_list for r in new_routes]
         generator.validate_solution([r.route_list for r in new_routes], generator.model.objval)
 
 @cli.command()
-def non_linear_debug():
-   
+def non_linear_debug():   
     click.echo("Running non-linear debug")
       # Specify the directory you want to search
-    directory = "mdevs/data/instances_large/"
     directory = "mdevs/data/instances_regular/"
+    directory = "mdevs/data/instances_large/"
 
     # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
     json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
@@ -147,10 +147,16 @@ def non_linear_debug():
     for json_file in json_files:     
         if "fragments" in str(json_file):
             continue
+        if "100" not in str(json_file):
+        # if "50" not in str(json_file):
+            continue
         print(f"Solving {json_file}...")
-        model = NonLinearFragmentGenerator(json_file, config={"RECHARGE_TIME_IN_MINUTES": 0.5})
+        model = NonLinearFragmentGenerator(json_file, config={"RECHARGE_DELAY_IN_MINUTES": 0.5})
+        # profiler = cProfile.Profile()
         model.run()
-        model.create_routes()
+       
+        # break
+        # model.create_routes()
         continue
 
 # @cli.command()
@@ -176,7 +182,12 @@ def constant_time_single(size: str):
             generator.model.setParam("OutputFlag", 0)
             generator.build_model()
             print("solving...")
-            generator.solve()
+            profiler = cProfile.Profile()
+            with cProfile.Profile() as profile: 
+                generator.solve()
+            profiler.create_stats()
+            profiler.dump_stats(open("solve_profile.prof", "w"))
+            profiler.print_stats()
             print("sequencing routes...")
             routes = generator.forward_label()
             print(f"Fragment routes: {len(routes)}")
@@ -258,9 +269,10 @@ def constant_time_naive_ip_run():
 
 
 if __name__ == "__main__":
-    constant_time_single("200")
+    # constant_time_single("50")
     # cli()
-    # non_linear_debug()
+    # constant_time_debug()
+    non_linear_debug()
     # constant_time_naive_ip_run()
     # compare_sequencing_procedures()
     # non_linear_debug()
