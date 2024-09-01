@@ -3,9 +3,35 @@ import math
 import time as timer
 from dataclasses import dataclass, field
 import functools
+import numpy as np
+from typing import TypedDict, Any
+from enum import Enum
+from plotly.graph_objects import Figure
 import cProfile
-
+import bisect
+from mdevs.formulations.base import CalculationConfig
+from mdevs.utils.visualiser import visualise_charge_network, visualise_network_transformation
 from mdevs.formulations.base import *
+
+class SecondObjectives(Enum):
+    """
+    Enum for the different second objectives that can be used in the DDD process
+    """
+    NONE = "min_vehicles"
+    MIN_CHARGE = "min_charge"
+    MIN_DEADHEADING = "min_deadheading"
+    MAX_DEADHEADING = "max_deadheading"
+
+@dataclass
+class SolveConfig:
+    """Config for different aspects of the DDD process"""
+    MAX_ITERATIONS: int = 1000
+    TIME_LIMIT: int = 900
+    MIP_GAP: float = 0.05
+    REPAIR_UNTIL_RECHARGED: bool = False #Whether to add recharge nodes until we hit max charge (or some other interval, for example until the function hits its non-linear phase) 
+    SECOND_OBJECTIVE: SecondObjectives = SecondObjectives.NONE
+    INCLUDE_VISUALISATION: bool = False
+    INCLUDE_MODEL_OUTPUT: bool = False
 
 @dataclass
 class ValidationStore:
@@ -20,25 +46,76 @@ class ValidationStore:
         self.new_recharge_arcs.update(other.new_recharge_arcs)
         self.jobs_to_update.update(other.jobs_to_update)
 
+class NonLinearStatistics(TypedDict):
+    inspection_time: float = None
+    num_lp_iters: int = None
+    num_lp_iters: int = None
+    mip_runtime: float = None
+    lp_runtime: float = None
+    a_priori_charge_network_nodes: int = None
+    a_priori_charge_network_arcs: int = None
+    invalid_route_segments: int = 0
+
+class PaperChargeFunction(ChargeCalculator):
+    """
+    Implements the charging function as described in the paper
+    """
+
+    def get_charge_at_time(self, t: int) -> int:
+        """returns the charge level from 0% when charging for t units of time as outlined in the paper."""
+        if t <= 80:
+            charge = 2 * t
+        elif t <= 160:
+            charge = 640/3 - ((12800 / 9) / (t - 160 / 3))
+        else:
+            charge = 200
+
+        if charge * self.dilation_factor > self.config.MAX_CHARGE:
+            raise ValueError(f"Charge level {charge} exceeds the maximum charge level")
+        val = charge * self.dilation_factor
+        if self.discretise:
+            val = math.floor(val)
+        return val
+    
+    def charge_inverse(self, charge: int):
+        """Returns the time to charge to a certain level"""
+        if charge <= 160 * self.dilation_factor:
+            t = charge / (2 * self.dilation_factor)
+        elif charge < 200 * self.dilation_factor:
+            t = 160 * (charge * self.dilation_factor - 240) / (3 * charge - 640* self.dilation_factor)
+        else:
+            t = 160 / self.dilation_factor
+        if self.discretise:
+            t = math.ceil(t)
+        return t
+
 class NonLinearFragmentGenerator(BaseFragmentGenerator):
-    def __init__(self, file: str, config: dict = {}):
-        super().__init__(file, params=config)
-        # % difference from an undiscretised maximum charge of 100%
-        self.dilation_factor = 2 * self.config.UNDISCRETISED_MAX_CHARGE / 100 * self.config.PERCENTAGE_CHARGE_PER_UNIT 
+    TYPE="non-linear"
+    def __init__(
+            self, 
+            file: str,
+            config=CalculationConfig(),
+            solve_config=SolveConfig(),
+            charge_calculator_class: ChargeCalculator=PaperChargeFunction,
+            charge_calculator_kwargs: dict[str, Any]={},
+        ):
+        """
+        Creates a new instance of the NonLinearFragmentGenerator.
+        Note: the charge_calculator_class must be the class itself, not an instance of the class.
+        This is so the calculation config can be passed in during initialisation of the class instead of passing it in at two points.
+        charge_calculator_kwargs are any additional arguments to be passed to the charge_calculator_class specific to an implementation.
+        """
+        super().__init__(file, config=config)
+        self.solve_config = solve_config
+        self.charge_calculator: ChargeCalculator = charge_calculator_class(config=config, **charge_calculator_kwargs)
         self.charge_fragments_by_charge_depot: dict[ChargeDepot, set[ChargeFragment]] = defaultdict(set[ChargeFragment])
+        self.charge_fragments_by_id: dict[int, set[ChargeFragment]] = defaultdict(set[ChargeFragment])
         self.charge_depots_by_depot: dict[int, set[ChargeDepot]] = defaultdict(set)
         self.start_time_by_depot: dict[int, int] = {}
         self.end_times_by_depot: dict[int, int] = {}
-
-    def get_charge(self, charge: int, recharge_time: int):
-        """
-        Determines the state of charge given a charge level and the amount of time it has to charge.
-        """
-        if recharge_time <= 0:
-            return -1
-        
-        final_charge = self.get_charge_at_time(self.charge_inverse(charge) + recharge_time)
-        return final_charge
+        self.next_time_after_depot_time_cache: dict[tuple[int, int], int] = {}
+        self.deadheading_time_by_fragment_cache: dict[int, int] = {}
+        self.statistics = NonLinearStatistics(**self.statistics)
 
     def get_charge_at_time(self, t: int) -> int:
         """returns the charge level from 0% when charging for t units of time as outlined in the paper."""
@@ -127,19 +204,66 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         return reachable_jobs
 
     def generate_timed_network(self) -> None:
+        """
+        Generates the initial network to be solved on.
+        This ignores any charge based requirements in the network.
+        One exception is that the end node of charge fragments is set to be the first time it reaches the end_depot
+        and has enough charge to execute another fragment from that current ChargeDepot
+        e.g. if a fragment ends at time 10 with 20 charge, and the smallest charge fragment requires 30 charge at time 10
+        then it cannot execute anything from that depot and must recharge.
+        Instead, we determine the first time after arriving that it has enough charge to feasibly execute a fragment.
+        For the above example this may imply charging for 5 time units until it can execute the new fragment.
+
+        """
         time0 = timer.time()
         self.charge_depots_by_charge_fragment: dict[int, ChargeDepotStore] = defaultdict(ChargeDepotStore)
+        # Begin by finding all times something could happen
+        # TODO: add a check which will exclude any times where no job can be reached, i.e. when the min-charge condition is required.
+        arrival_times_by_depot: dict[int, set[int]] = defaultdict(set)
+        departure_times_by_depot: dict[int, set[int]] = defaultdict(set)
+        print("getting end/start times")
+        time_id_pairs: set[tuple[int, int]] = set()
+        for f in self.fragment_set:
+            time_id_pairs.add((f.start_depot_id, f.start_time,))
+            time_id_pairs.add((f.end_depot_id, f.end_time))
+            departure_times_by_depot[f.start_depot_id].add(f.start_time)
+            arrival_times_by_depot[f.end_depot_id].add(f.end_time)
+
+        self.departure_times_by_depot = {
+            id: sorted(times) for id, times in departure_times_by_depot.items()
+        }
+        self.arrival_times_by_depot = {
+            id: sorted(times) for id, times in arrival_times_by_depot.items()
+        }
+
+        for id, time in time_id_pairs:
+            self.charge_depots_by_depot[id].add(ChargeDepot(id=id, time=time, charge=self.config.MAX_CHARGE))
+
+        self.start_times_by_depot = {
+            depot: min(self.charge_depots_by_depot[depot], key = lambda x: x.time).time 
+            for depot in self.charge_depots_by_depot 
+        }
+        self.end_times_by_depot = {
+            depot: max(self.charge_depots_by_depot[depot], key = lambda x: x.time).time 
+            for depot in self.charge_depots_by_depot 
+        }
+        print('creating charge fragments')
+        # Get all        
         for fragment in self.fragment_set:
-            arrival_depot = ChargeDepot(id=fragment.start_depot_id, time=fragment.start_time, charge=self.config.MAX_CHARGE)
-            end_depot = ChargeDepot(id=fragment.end_depot_id, time=fragment.end_time, charge=self.config.MAX_CHARGE)
             charge_fragment = ChargeFragment.from_fragment(start_charge=self.config.MAX_CHARGE, fragment=fragment)
+            self.charge_fragments_by_id[fragment.id].add(charge_fragment)
+            arrival_depot = charge_fragment.start_charge_depot
+            # Baking in any required recharge to be useful
+            first_depot_which_can_leave = self._get_first_depot_vehicle_can_leave_from(charge_fragment.end_charge_depot)
+            # Remaps to the maximum charge
+            end_depot = ChargeDepot(
+                id=charge_fragment.end_depot_id, time=first_depot_which_can_leave.time, charge=self.config.MAX_CHARGE
+            )
             self.charge_fragments.add(charge_fragment)
             self.charge_fragments_by_charge_depot[arrival_depot].add(charge_fragment)
             self.charge_fragments_by_charge_depot[end_depot].add(charge_fragment)
             self.charge_depots_by_charge_fragment[charge_fragment] = ChargeDepotStore(start=arrival_depot, end=end_depot)
-            self.charge_depots_by_depot[arrival_depot.id].add(arrival_depot)
-            self.charge_depots_by_depot[end_depot.id].add(end_depot)
-        
+        print("creating charge arcs")
         # Create the recharge arcs
         for depot in self.charge_depots_by_depot:
             depots_in_time_order = sorted(self.charge_depots_by_depot[depot])
@@ -155,19 +279,12 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             charge_depot: self.recharge_arcs_by_charge_depot[charge_depot] | self.charge_fragments_by_charge_depot[charge_depot]
             for depot in self.charge_depots_by_depot for charge_depot in self.charge_depots_by_depot[depot]
         }
-        self.start_times_by_depot = {
-            depot: min(self.charge_depots_by_depot[depot], key = lambda x: x.time).time 
-            for depot in self.charge_depots_by_depot 
-        }
-        self.end_times_by_depot = {
-            depot: max(self.charge_depots_by_depot[depot], key = lambda x: x.time).time 
-            for depot in self.charge_depots_by_depot 
-        }
         
         self.statistics.update(
             {
-                "timed_network_generation": timer.time() - time0,
-                "timed_network_size": sum(len(v) for v in self.charge_fragments_by_charge_depot.values())
+                "initial_charge_network_generation": timer.time() - time0,
+                "initial_charge_network_arcs": len(self.charge_fragments) + len(self.recharge_arcs),
+                "initial_charge_network_nodes": len(self.charge_depots)
             }
         )
 
@@ -184,7 +301,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             case Fragment():
                 if depot.time == arc.start_time and depot.id == arc.start_depot_id:
                     return -1
-                elif depot.time == arc.end_time and depot.id == arc.end_depot_id:
+                elif depot.time >= arc.end_time and depot.id == arc.end_depot_id:
                     return 1
                 
             case FrozenChargeDepotStore():
@@ -196,6 +313,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 raise ValueError("Fragment and depot do not have a common time / location")
 
     def _add_flow_balance_constraint(self, charge_depot: ChargeDepot) -> None:
+        if charge_depot.time == self.end_times_by_depot[charge_depot.id] and charge_depot.charge != self.config.MAX_CHARGE:
+            raise Exception()
         name = f"flow_{str(charge_depot)}"
         recharge_arcs = self.recharge_arcs_by_charge_depot[charge_depot]
         fragment_flow = quicksum(
@@ -230,7 +349,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             for charge_depot in self.charge_depots_by_depot[depot]:
                 self._add_flow_balance_constraint(charge_depot)
 
-    def validate_route(self, route: list[ChargeDepot | Fragment]) -> tuple[bool, list[ChargeDepot | Fragment]]:
+    def validate_route(self, route: list[ChargeDepot | Fragment], start_charge: int | None=None) -> tuple[bool, list[ChargeDepot | Fragment]]:
         """
         Validates a route to ensure it is feasible. 
         If it is not feasible, it returns the segment of the route which induced the infeasibility
@@ -241,11 +360,14 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         - Be able to feasibly reach each location in time
         """
         infractions = []
-        curr_charge = self.config.MAX_CHARGE
+        curr_charge = start_charge if start_charge is not None else self.config.MAX_CHARGE
         prev_location: ChargeDepot | Fragment = route[0]
         is_valid = True
         prev_time=prev_location.time
         for i, curr_location in enumerate(route[1:]):
+            # If only charge depots remain, then the route is valid
+            if all(isinstance(loc, ChargeDepot) for loc in route[i+1:]):
+                break
             match prev_location, curr_location:
                 case ChargeDepot(), ChargeDepot():
                     # recharge arc
@@ -253,8 +375,13 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                         raise Exception("Holding arcs should only be for the same depot")
                     curr_charge = self.get_charge(curr_charge, curr_location.time - prev_location.time)
                     prev_time = curr_location.time
-                case ChargeDepot(), Fragment():
-                    curr_charge, prev_time, is_valid = self.validate_fragment(curr_location, curr_charge, prev_time)
+
+                case Fragment(), ChargeDepot():
+                    curr_charge, prev_time, is_valid = self.validate_fragment(prev_location, curr_charge, prev_time)
+                    # Check if there is any time between the two locations
+                    if curr_charge is not None:
+                        curr_charge = self.get_charge(curr_charge, curr_location.time - prev_location.end_time)
+
                 case Fragment(), Fragment():
                     raise Exception("Cannot have two fragments in a row")
             if not is_valid:
@@ -333,15 +460,24 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         routes = self.forward_label(solution_charge_fragments, waiting_arcs)
         has_violations = False
         nodes_to_update = set()
+        n_added = 0
         for route in routes:
-            is_valid, segment = self.validate_route(route.route_list)
-            if not is_valid:
+            for i, (curr, next) in enumerate(zip(route.route_list, route.route_list[1:])):
+                if not (isinstance(curr, ChargeDepot) and isinstance(next, Fragment)):
+                    continue
+                route_segment = route.route_list[i:]
+                is_valid, segment = self.validate_route(route_segment, start_charge=curr.charge)
+                if is_valid:
+                    break
+
+                nodes_to_update.update(self.amend_violated_route(segment, store=store))       
                 has_violations = True
-                # print(f"Invalid route: {segment}, repairing...")
-                nodes_to_update.update(self.amend_violated_route(segment, store=store))
+                n_added += 1
+        if n_added > 0:
+            self.statistics["invalid_route_segments"] += 1
+            print(f"violations: {n_added=}")
         
-        assert store.depots_to_update == nodes_to_update, (store.depots_to_update.difference(nodes_to_update), nodes_to_update.difference(store.depots_to_update))
-        # Update model to reflect new arcs and nodes.
+       # Update model to reflect new arcs and nodes.
         for node in store.depots_to_update:
             if (constr:=self.flow_balance.pop(node, None)) is not None:
                 self.model.remove(constr)
@@ -384,25 +520,58 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         #TODO: Determine whether we check if we can recharge to execute something from the next node of fragments
         #      and if not then we repeat until we find the next existing node that can be executed and map it to there instead
         """
-        curr_charge = self.config.MAX_CHARGE
         prev_location: ChargeDepot | Fragment = segment[0]
-        curr_time = prev_location.time
+        curr_charge = prev_location.charge
         nodes_to_update: set[ChargeDepot] = set()
+        prev_charge = curr_charge
+        new_depot = None
         for i, curr_location in enumerate(segment[1:]):
+            # For cases where a fragment was below the minimum charge at a node, so we need to 
+            if (
+                new_depot is not None 
+                and isinstance(curr_location, ChargeDepot)
+                and curr_location.time < new_depot.time
+            ):
+                prev_location = new_depot
+                curr_charge = new_depot.charge
+                continue
+                
             match prev_location, curr_location:
                 case ChargeDepot(), ChargeDepot():
                     curr_charge = self.get_charge(curr_charge, curr_location.time - prev_location.time)
 
                 case Fragment(), ChargeDepot():
-                    curr_charge -= prev_location.charge
-            
-            if isinstance(curr_location, ChargeDepot) and curr_charge < curr_location.charge:
-                nodes_to_update.update(
-                    self._add_new_depot(
-                        ChargeDepot(id=curr_location.id, time=curr_location.time, charge=curr_charge),
-                        store=store
+                    if prev_location.end_time > curr_location.time:
+                        raise ValueError()
+                    curr_charge = self.get_charge(
+                        curr_charge - prev_location.charge, curr_location.time - prev_location.end_time
                     )
+            if curr_charge < 0:
+                raise ValueError(f"Charge level {curr_charge} is below 0")
+           
+            if isinstance(curr_location, ChargeDepot) and curr_charge < curr_location.charge:
+                if curr_location.time == self.end_times_by_depot[curr_location.id]:
+                    continue
+                new_depot = ChargeDepot(id=curr_location.id, time=curr_location.time, charge=curr_charge)
+                # After a fragment, if it is below the minimum charge, its destination depot isn't 
+                # necessarily the next one in the current route (since it assumed it has a higher charge and can therefore do more)
+                # Ensure we add that new depot as well.
+                if (
+                    curr_charge < self._get_min_fragment_charge_from_depot(curr_location.id, curr_location.time)
+                    and isinstance(prev_location, Fragment)
+                ):
+                    new_depot = self._get_first_depot_vehicle_can_leave_from(
+                        ChargeDepot(id=curr_location.id, time=curr_location.time, charge=curr_charge)
+                    )
+
+                if new_depot in self.charge_depots_by_depot[new_depot.id]:
+                    prev_location = curr_location
+                    continue
+
+                nodes_to_update.update(
+                    self._add_new_depot(new_depot, store=store)
                 )
+            prev_charge = curr_charge
             prev_location = curr_location
         return nodes_to_update
 
@@ -410,6 +579,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         """
         Gets the same or next highest charge depot at the given time and depot
         """
+        #TODO: keep track of real charge levels by depot same as get_next_departure_time_from_depoth
         charge_depots = self.charge_depots_by_depot[charge_depot.id]
         for level in range(charge_depot.charge, self.config.MAX_CHARGE + 1):
             if (test_depot := ChargeDepot(id=charge_depot.id, time=charge_depot.time, charge=level)) in charge_depots:
@@ -417,26 +587,71 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         else:
             raise ValueError(f"No charge depot found for time: {test_depot.time}, charge: {test_depot.charge}")
     
-    @functools.cache
-    def _get_next_time_from_depot(self, id: int, time: int) -> int:
+    def _get_first_depot_vehicle_can_leave_from(self, charge_depot: ChargeDepot) -> ChargeDepot:
+        """
+        Returns the first charge depot with enough charge to execute a fragment
+        """
+        min_charge = self._get_min_fragment_charge_from_depot(charge_depot.id, charge_depot.time)
+        max_iters = len(self.departure_times_by_depot[charge_depot.id])
+        iters =0
+        while (
+            (charge_depot.charge < min_charge
+            or min_charge == -1)
+            and iters < max_iters
+        ):
+            if charge_depot.charge < 0:
+                raise ValueError(f"Charge depot {charge_depot} has negative charge")
+            new_time = self._get_next_departure_time_from_depot(charge_depot.id, charge_depot.time)
+            if new_time is None:
+                # Final point always has max charge
+                charge_depot = ChargeDepot(id=charge_depot.id, time=charge_depot.time, charge=self.config.MAX_CHARGE)
+                return charge_depot
+            new_charge = self.get_charge(charge_depot.charge, new_time - charge_depot.time)
+            charge_depot = ChargeDepot(id=charge_depot.id, time=new_time, charge=new_charge)
+            min_charge = self._get_min_fragment_charge_from_depot(charge_depot.id, new_time)
+            iters+=1
+        if iters == max_iters:
+            raise ValueError(f"Could not find a depot with enough charge to execute a fragment from {charge_depot}")
+        return charge_depot
+
+    def _get_next_departure_time_from_depot(self, id: int, time: int) -> int | None:
         """
         Gets the next earliest time an event occurs at the depot after the given charge depot's time
+        Returns None if there is not another time.
         """
-        charge_depots = self.charge_depots_by_depot[id]
-        return min((cd.time for cd in charge_depots if cd.time > time), default=None)
+        if (id, time) in self.next_time_after_depot_time_cache:
+            return self.next_time_after_depot_time_cache[id, time]
+
+        charge_depots = [cd.time for cd in self.charge_depots_by_depot[id] if cd.time > time]
+        next_time = min(charge_depots, default=None)
+        self.next_time_after_depot_time_cache[id, time] = next_time
+        return next_time
+
+        times = self.departure_times_by_depot[id]
+        idx = bisect.bisect_right(times, time)
+        
+        if idx == len(times):
+            next_time = None
+        else:
+            next_time = times[idx]
+       
+        self.next_time_after_depot_time_cache[id, time] = next_time
+        return next_time
     
     def _add_new_depot(
-            self, charge_depot: ChargeDepot, store=ValidationStore()
+            self, charge_depot: ChargeDepot, origin_fragment: ChargeFragment | None=None, use_min_charge_condition=False, store=ValidationStore()
         ) -> set[ChargeDepot]:
         """
         Repairs a given node by adding a new node to the network at the real charge level
         This involves rectifying both fragment and charge arcs from the new node.
         """
-        if charge_depot.charge > self.config.MAX_CHARGE:
-            raise ValueError("Cannot add a depot with a charge higher than the maximum charge")
         nodes_to_update: set[ChargeDepot] = set()
-        updated_fragments = self._update_fragment_arcs(charge_depot, store=store)
-        updated_charge = self._update_charge_arcs(charge_depot, use_min_charge_condition=False, store=store)
+        # if charge_depot in self.charge_depots_by_depot[charge_depot.id]:
+        #     return nodes_to_update
+        updated_fragments = self._update_fragment_arcs(charge_depot, origin_fragment=origin_fragment, store=store)
+        updated_charge = self._update_charge_arcs(
+            charge_depot, use_min_charge_condition=use_min_charge_condition, store=store
+        )
         
         nodes_to_update.update(updated_fragments)
         nodes_to_update.update(updated_charge)
@@ -447,10 +662,16 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             self.charge_depots_by_depot[node.id].add(node)
         return nodes_to_update
 
-    def _update_fragment_arcs(self, new_depot: ChargeDepot, store=ValidationStore()) -> set[ChargeDepot]:
+    def _update_fragment_arcs(
+            self, new_depot: ChargeDepot, origin_fragment: ChargeFragment | None=None, store=ValidationStore()
+        ) -> set[ChargeDepot]:
         """
         Updates the network to include the new depot. 
         Returns a set of nodes which need to have their flow balance constraints updated (or added).
+        The parameter origin_fragment allows one to specify the fragment which caused this addition.
+            This is needed to change the end node of the fragment to the new depot, 
+            since in the case where it is below the minimum charge at the desitnation node, 
+            it needs to be rerouted to the first once after.
         For inbound arcs (charge-fragments):
         - check their start levels (based on their charge state), see if the end aligns
         - if it is below or at new_depot, we remap their end nodes to this new node.
@@ -464,19 +685,10 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         outbound_arcs: list[ChargeFragment] = []
         nodes_to_update: set[ChargeDepot] = {prev_depot, new_depot}
         invalid_inbound_arcs: list[ChargeFragment] = []
-        if any(
-            cf.id in [452, 448, 450, 446, 451, 444, 447, 445, 449]
-            for cf in self.charge_fragments_by_charge_depot[prev_depot]
-        ):
-            pass
+
         for charge_fragment in self.charge_fragments_by_charge_depot[prev_depot]:
-            # Inbound arc
-            if (
-                charge_fragment.end_time == new_depot.time 
-                and charge_fragment.end_depot_id == new_depot.id 
-                and charge_fragment.end_charge <= new_depot.charge
-            ):
-                invalid_inbound_arcs.append(charge_fragment)
+            # Determine whether this has had recharge time built into it.    
+
             # Outbound arc
             if (
                 charge_fragment.start_time == new_depot.time 
@@ -484,42 +696,45 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 and new_depot.charge - charge_fragment.charge >= 0
             ):
                 outbound_arcs.append(charge_fragment)
-        
-        """
-        Dealing with remap arcs:
-        - Update the start/end store they're attached to
-        - Update the constraint at the OLD end node
-        """
+            elif (
+                # Inbound arc with no recharge
+                charge_fragment.end_depot_id == new_depot.id 
+                # and charge_fragment.end_charge <= new_depot.charge
+                and charge_fragment.end_time <= new_depot.time 
+                and self.get_charge(
+                    charge_fragment.end_charge, new_depot.time - charge_fragment.end_time
+                ) <= new_depot.charge
+            ):
+                invalid_inbound_arcs.append(charge_fragment)
+
         for charge_fragment in invalid_inbound_arcs:
             self.charge_fragments_by_charge_depot[prev_depot].remove(charge_fragment)
             self.charge_fragments_by_charge_depot[new_depot].add(charge_fragment)
             self.charge_depots_by_charge_fragment[charge_fragment].end = new_depot
+        if origin_fragment is not None and origin_fragment not in invalid_inbound_arcs:
+            frag_depots = self.charge_depots_by_charge_fragment[origin_fragment]
+            store.depots_to_update.add(frag_depots.end)
+            self.charge_fragments_by_charge_depot[frag_depots.end].remove(origin_fragment)
+            self.charge_fragments_by_charge_depot[new_depot].add(origin_fragment)
+            frag_depots.end = new_depot
 
-        """"
-        Dealing with outbound arcs
-        - create a new ChargeFragment with new_depot's charge level
-        - add a new start/end store to this node
-        """
+
         for charge_fragment in outbound_arcs:
             new_charge_fragment = ChargeFragment.from_fragment(
                 start_charge=new_depot.charge, fragment=charge_fragment
             )
-            end_depot = self._get_closest_charge_depot(
+            first_depot_which_can_leave = self._get_first_depot_vehicle_can_leave_from(
                 ChargeDepot(
                     id=charge_fragment.end_depot_id,
                     time=new_charge_fragment.end_time,
                     charge=new_charge_fragment.end_charge
                 )
             )
+            end_depot = self._get_closest_charge_depot(first_depot_which_can_leave)
+
             self.charge_fragments.add(new_charge_fragment)
-            self.charge_fragments_by_charge_depot[new_depot].add(new_charge_fragment)
-            self.charge_fragments_by_charge_depot[end_depot].add(new_charge_fragment)
-            self.charge_depots_by_charge_fragment[new_charge_fragment] = ChargeDepotStore(
-                start=new_depot, end=end_depot
-            )
-            self.fragment_vars_by_charge_fragment[new_charge_fragment] = self.model.addVar(
-                vtype=GRB.BINARY, name=f"f_{new_charge_fragment.id}_c_{new_charge_fragment.start_charge}"
-            )
+            self._remove_charge_fragment_variable(new_charge_fragment)
+            self._add_charge_fragment_variable(new_depot, end_depot, new_charge_fragment)
             nodes_to_update.add(end_depot)
             store.new_fragment_arcs.add(new_charge_fragment)
             for job in charge_fragment.jobs:
@@ -530,6 +745,20 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         store.new_fragment_arcs.update(invalid_inbound_arcs)
 
         return nodes_to_update
+
+    def _add_charge_fragment_variable(
+            self, new_depot: ChargeDepot, end_depot: ChargeDepot, new_charge_fragment: ChargeFragment
+        ) -> None:
+        self.charge_fragments_by_charge_depot[new_depot].add(new_charge_fragment)
+        self.charge_fragments_by_charge_depot[end_depot].add(new_charge_fragment)
+        self.charge_fragments_by_id[new_charge_fragment.id].add(new_charge_fragment)
+        self.charge_depots_by_charge_fragment[new_charge_fragment] = ChargeDepotStore(
+                start=new_depot, end=end_depot
+            )
+            # TODO: CHASE THIS UP - ARE WE GETTING DUPLICATES
+        self.fragment_vars_by_charge_fragment[new_charge_fragment] = self.model.addVar(
+                vtype=GRB.BINARY, name=f"f_{new_charge_fragment.id}_c_{new_charge_fragment.start_charge}"
+            )
 
     def _update_charge_arcs(
             self, new_depot: ChargeDepot, use_min_charge_condition: bool=False, store=ValidationStore()
@@ -576,7 +805,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 store.new_recharge_arcs.add(new_recharge_arc)
                 nodes_to_update.update({recharge_arc.start, recharge_arc.end, new_depot})
         store.depots_to_update.update(nodes_to_update)
-        end_time = self._get_next_time_from_depot(new_depot.id, new_depot.time)
+        end_time = self._get_next_departure_time_from_depot(new_depot.id, new_depot.time)
         # This is the last time node. We don't need to add any more charge arcs
         if end_time is None:
             return nodes_to_update
@@ -594,12 +823,12 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         has_insufficient_charge = False
         if end_charge > self.config.MAX_CHARGE:
             raise ValueError("Cannot add a depot with a charge higher than the maximum charge")
-        if use_min_charge_condition:
-            # Find the minimum charge required to execute any fragment at this time
-            min_charge = self._get_min_fragment_charge_from_depot(new_depot.id, end_time)
-            # If we can't execute any fragment at that time, need to add a new node at that point.
-            if end_charge <= min_charge:        
-                has_insufficient_charge = True
+        # if use_min_charge_condition:
+        #     # Find the minimum charge required to execute any fragment at this time
+        #     min_charge = self._get_min_fragment_charge_from_depot(new_depot.id, end_time)
+        #     # If we can't execute any fragment at that time, need to add a new node at that point.
+        #     if end_charge <= min_charge:        
+        #         has_insufficient_charge = True
         
         closest_recharge_depot = self._get_closest_charge_depot(
             ChargeDepot(id=new_depot.id, time=end_time, charge=end_charge)
@@ -619,19 +848,22 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         store.depots_to_update.update(nodes_to_update)
         return nodes_to_update
 
-    def _get_min_fragment_charge_from_depot(self, depot_id: int, end_time: int) -> int:
-        if self.minimum_charge_by_time_by_depot.get((depot_id, end_time)) is not None:
-            return self.minimum_charge_by_time_by_depot[depot_id, end_time]
+    def _get_min_fragment_charge_from_depot(self, depot_id: int, time: int) -> int:
+        """
+        Returns the smallest amount of charge required from a given depot location and time 
+        needed to execute a fragment that leaves at that point.
+        """
+        if self.minimum_charge_by_time_by_depot.get((depot_id, time)) is not None:
+            return self.minimum_charge_by_time_by_depot[depot_id, time]
         min_charge = min(
                 (
                     fragment.charge 
-                    for fragment in self.charge_fragments_by_charge_depot[
-                        ChargeDepot(id=depot_id, time=end_time, charge=self.config.MAX_CHARGE)
-                    ]
+                    for fragment in self.fragment_set
+                    if fragment.start_depot_id == depot_id and fragment.start_time == time
                 ),
                 default=-1
             )
-        self.minimum_charge_by_time_by_depot[depot_id, end_time] = min_charge
+        self.minimum_charge_by_time_by_depot[depot_id, time] = min_charge
         return min_charge
     
     def _remove_recharge_arc_variable(self, recharge_arc: FrozenChargeDepotStore):
@@ -642,14 +874,17 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         del self.recharge_arc_var_by_depot_store[recharge_arc]
 
     def _remove_charge_fragment_variable(self, charge_fragment: ChargeFragment):
-        self.model.remove(self.fragment_vars_by_charge_fragment[charge_fragment])
-        del self.fragment_vars_by_charge_fragment[charge_fragment]
-        store = self.charge_depots_by_charge_fragment.pop(charge_fragment)
-        for job in charge_fragment.jobs:
-            self.charge_fragments_by_job[job].remove(charge_fragment)
-        self.charge_fragments_by_charge_depot[store.start].remove(charge_fragment)
-        self.charge_fragments_by_charge_depot[store.end].remove(charge_fragment)
-        self.charge_fragments.remove(charge_fragment)
+        try:
+            self.model.remove(self.fragment_vars_by_charge_fragment[charge_fragment])
+            del self.fragment_vars_by_charge_fragment[charge_fragment]
+            store = self.charge_depots_by_charge_fragment.pop(charge_fragment)
+            for job in charge_fragment.jobs:
+                self.charge_fragments_by_job[job].remove(charge_fragment)
+            self.charge_fragments_by_charge_depot[store.start].remove(charge_fragment)
+            self.charge_fragments_by_charge_depot[store.end].remove(charge_fragment)
+            self.charge_fragments.remove(charge_fragment)
+        except KeyError:
+            pass
 
 
     def _add_recharge_arc_variable(self, recharge_arc: FrozenChargeDepotStore) -> None:
@@ -662,153 +897,291 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
 
     def set_solution(self) -> set[ChargeFragment]:
         paper_solution, _ = self.convert_solution_to_fragments(instance_type="regular", charging_style='non-linear')
-        charge_routes = self.get_validated_timed_solution(paper_solution)
-        used_fragments = {cf.id for route in charge_routes for cf in route if isinstance(cf, ChargeFragment)}
-        removes = set()
-        for cf in self.fragment_vars_by_charge_fragment:
-            if cf.id not in used_fragments:
-                removes.add(cf)
-        for cf in removes:
-            self._remove_charge_fragment_variable(cf)
+        # charge_routes = self.get_validated_timed_solution(paper_solution)
+        # used_fragments = {cf.id for route in charge_routes for cf in route if isinstance(cf, ChargeFragment)}
+        # removes = set()
+        # for cf in self.fragment_vars_by_charge_fragment:
+        #     if cf.id not in used_fragments:
+        #         removes.add(cf)
+        # for cf in removes:
+        #     self._remove_charge_fragment_variable(cf)
         self.model.addConstr(quicksum(self.starting_counts.values()) == len(paper_solution))
 
-        return {cf for cf in self.charge_fragments if cf not in removes}
+        # return {cf for cf in self.charge_fragments if cf not in removes}
 
-    def solve(self):
-        # self.model.setParam("OutputFlag", 0)
+    def _add_end_nodes_for_fragments(self) -> None:
+        """
+        Adds the true end nodes for each fragment generated leaving at full charge.
+        This pre-populates the initial solution.
+        #TODO: ensure this has propagated the fixes to fuck off copilot 
+        """
+        depots_to_add: set[ChargeDepot] = set()
+        for cf in self.charge_fragments:
+            end_depot = self._get_first_depot_vehicle_can_leave_from(cf.end_charge_depot)
+            if end_depot.time == self.end_times_by_depot[cf.end_depot_id]:
+                continue
+            depots_to_add.add(end_depot)
+        store = ValidationStore(depots_to_update=depots_to_add)
+        for charge_depot in list(depots_to_add):
+            self._add_new_depot(charge_depot, use_min_charge_condition=False, store=store)
+
+        for node in store.depots_to_update:
+            if (constr:=self.flow_balance.pop(node, None)) is not None:
+                self.model.remove(constr)
+            self._add_flow_balance_constraint(node)
+
+        for job in store.jobs_to_update:
+            if (constraint := self.coverage.pop(job, None)) is not None:
+                self.model.remove(constraint)
+            self._add_coverage_constraint(job)
         self.model.update()
+
+    def _add_nodes_at_charge_level(self, charge: int, store=ValidationStore()) -> None:
+        """
+        Adds nodes at each charge level for each depot.
+        """    
+        depots_to_add: set[ChargeDepot] = set()
+        for depot in self.charge_depots_by_depot:
+            start_time = self.start_times_by_depot[depot]
+            end_time = self.end_times_by_depot[depot]
+            times = sorted(set(cd.time for cd in self.charge_depots_by_depot[depot]))
+            for time in times:
+                if time in [start_time, end_time]:
+                    continue
+                depots_to_add.add(ChargeDepot(id=depot, time=time, charge=charge))
+
+        for charge_depot in depots_to_add:
+            self._add_new_depot(charge_depot, use_min_charge_condition=False, store=store)
+        store.depots_to_update.update(depots_to_add)
+
+        for node in store.depots_to_update:
+            if (constr:=self.flow_balance.pop(node, None)) is not None:
+                self.model.remove(constr)
+            self._add_flow_balance_constraint(node)
+
+        for job in store.jobs_to_update:
+            if (constraint := self.coverage.pop(job, None)) is not None:
+                self.model.remove(constraint)
+            self._add_coverage_constraint(job)
+
+        self.model.update()
+
+    def _set_minimum_charge_objective(self) -> None:
+        self.model.setObjective(
+            quicksum(
+                self.fragment_vars_by_charge_fragment[cf] * cf.charge for cf in self.charge_fragments
+            ),
+            GRB.MINIMIZE
+        )
+
+    def _set_dead_heading_objective(self, sense="min"):
+        self.model.setObjective(
+            quicksum(
+                self._get_travel_time_for_fragment(arc.id) * var  for arc, var in self.fragment_vars_by_charge_fragment.items()
+            ),
+            GRB.MINIMIZE if sense == "min" else GRB.MAXIMIZE
+        )
+
+    def _set_secondary_objective(self) -> None:
+        match self.solve_config.SECOND_OBJECTIVE:
+            case SecondObjectives.MIN_CHARGE:
+                self._set_minimum_charge_objective()
+            case SecondObjectives.MIN_DEADHEADING:
+                self._set_dead_heading_objective(sense="min")
+            case SecondObjectives.MAX_DEADHEADING:
+                self._set_dead_heading_objective(sense="max")
+    
+    def solve(self):
+        print("setting solve...")
+        self.model.setParam("OutputFlag", 0)
+        self.model.setParam("Seed", 0)
+        self.model.update()
+        use_visualisation = self.solve_config.INCLUDE_VISUALISATION
         valid_relaxation = False
-        var_type = GRB.CONTINUOUS #
-        first_time = False
-        also_first_time = True
-        # sol_fragments = self.set_solution()
-        self._validate_waiting_arcs()
-        n_iters = 0
+        var_type = GRB.CONTINUOUS
+        has_valid_lp_relaxation = False
+        n_iters = 1
         prev_obj = 0
-        time_dict: dict[str, float] = {
-            "solve_time": 0,
-            "inspection_time": 0
-        }
-        while not valid_relaxation and n_iters < 10:
+        num_lp_iters = 0
+        model_solve_time_key = "lp_runtime"if var_type == GRB.CONTINUOUS else "mip_runtime"
+        if use_visualisation:
+            fig = Figure()
+        self.statistics.update(
+            {
+                "runtime": 0,
+                "inspection_time": 0,
+                "num_lp_iters": 0,
+                "num_mip_iters": 0,
+                "lp_runtime": 0,
+                "mip_runtime": 0,
+                "invalid_route_segments": 0,
+            }
+        )
+
+        # self._add_initial_network_cuts()
+        self._change_variable_domain(var_type)
+        self.model.optimize()
+        self.statistics["runtime"] += self.model.Runtime
+        self.statistics[model_solve_time_key] += self.model.Runtime
+        # self.set_solution()
+        vehicle_count = self.model.objval
+        print(f"Initial solve took {self.model.Runtime}, {vehicle_count=}")#, paper: {self._get_paper_objective_value()}")
+        self.obj_constr = self.model.addConstr(quicksum(self.starting_counts.values()) == vehicle_count)
+        while (
+            not valid_relaxation 
+            and n_iters < self.solve_config.MAX_ITERATIONS 
+            and self.statistics['runtime'] + self.statistics['inspection_time'] < self.solve_config.TIME_LIMIT
+        ):
+            self._set_secondary_objective()
             n_iters += 1
             print(f"    Starting iteration {n_iters}")
-            self.change_variable_domain(var_type)
+            self._change_variable_domain(var_type)
+            
+            self.model.update()
             self.model.setParam("Seed", 0)
             self.model.optimize()
-            time_dict["solve_time"] += self.model.Runtime
-            from mdevs.utils.visualiser import visualise_charge_network
+            self.statistics["runtime"] += self.model.Runtime
+            self.statistics[model_solve_time_key] += self.model.Runtime
+
             if self.model.status == GRB.Status.OPTIMAL:
                 solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
                     (cf, self.fragment_vars_by_charge_fragment[cf].x) 
-                    for cf in self.fragment_vars_by_charge_fragment if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > EPS
+                    for cf in self.fragment_vars_by_charge_fragment 
+                    if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > EPS
                 }
                 if abs(self.model.objval - prev_obj) > EPS:
                     prev_obj = self.model.objval
-                    print(self.model.objval)
+                    print("    ", self.model.objval)
                     
-                # Sequence fragments by their start / end depots
                 waiting_arcs = [
                     (arc.start, arc.end, self.recharge_arc_var_by_depot_store[arc].x) 
                     for arc in self.recharge_arc_var_by_depot_store if self.recharge_arc_var_by_depot_store[arc].x > EPS
                 ]
-                # waiting_stores = [store for store in self.recharge_arc_var_by_depot_store if self.recharge_arc_var_by_depot_store[store].x > EPS]
-                # visualise_charge_network(
-                #     [cd for d in self.charge_depots_by_depot for cd in self.charge_depots_by_depot[d]],
-                #     [
-                #         (
-                #           self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
-                #         )
-                #         for cf, _ in solution_charge_fragments
-                #     ], 
-                #     [arc for arc in self.recharge_arc_var_by_depot_store if getattr(self.recharge_arc_var_by_depot_store[arc], "x", -1) > EPS],
-                #    [],[],[]
-                # ).show()
+                if use_visualisation:
+                    fig = self.add_solution_trace(fig=fig)
                 network_additions = ValidationStore()
-                print("     Inspecting solution...")
+                print("    Inspecting solution...")
                 time0 = timer.time()
                 valid_relaxation = self.inspect_solution(
                     solution_charge_fragments, waiting_arcs, store=network_additions
                 )
                 inspection_time = timer.time() - time0
-                time_dict["inspection_time"] += inspection_time
-                print(f"     Inspection took {inspection_time}, Solve took {self.model.Runtime}")
-                # new_fragment_stores = [self.charge_depots_by_charge_fragment[cf] for cf in network_additions.new_fragment_arcs]
-                self.model.update()
-                if valid_relaxation and also_first_time:
-                    print("Valid linear relaxation, changing to integer variables...")
+                if use_visualisation:
+                    self.add_inspection_trace(fig, network_additions)
+                self.statistics["inspection_time"] += inspection_time
+                # print(f"     Inspection took {inspection_time}, Solve took {self.model.Runtime}")
+                if valid_relaxation and not has_valid_lp_relaxation:
+                    print("    Valid linear relaxation, changing to integer variables...")
+                    num_lp_iters = n_iters
                     var_type = GRB.BINARY
-                    also_first_time = False
+                    model_solve_time_key = "mip_runtime"
+                    has_valid_lp_relaxation = True
                     valid_relaxation = False
-                prev_additions = network_additions
                 continue
             else:
-            #     visualise_charge_network(
-            #         [cd for d in self.charge_depots_by_depot for cd in self.charge_depots_by_depot[d]],
-            #         [
-            #             (
-            #               self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
-            #             )
-            #             for cf in sol_fragments
-            #         ], [],[],[], []
-                    # waiting_stores,
-                    # prev_additions.new_depots,
-                    # [(self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end) for cf in prev_additions.new_fragment_arcs],
-                    # prev_additions.new_recharge_arcs.intersection(self.recharge_arcs),
-                # ).show()
-                visualise_charge_network(
-                    [cd for d in self.charge_depots_by_depot for cd in self.charge_depots_by_depot[d]],
+                self.model.computeIIS()
+                self.model.write("fragment_network.ilp")
+                raise Exception("Relaxation is infeasible")
+        
+        hit_runtime_limit = (
+            self.statistics["runtime"] + self.statistics['inspection_time'] >= self.solve_config.TIME_LIMIT 
+            or
+            n_iters >= self.solve_config.MAX_ITERATIONS
+        )
+        if not hit_runtime_limit:
+            print(f"solved in {n_iters} iterations")
+            routes = self.forward_label(solution_charge_fragments, waiting_arcs)
+            assert len(routes) == vehicle_count
+            for route in routes:
+                is_valid, _ = self.validate_route(route.route_list)
+                assert is_valid
+
+        self.statistics.update(
+            {
+                "num_iters": n_iters,
+                "objective": len(routes) if not hit_runtime_limit else -1,
+                'solved': not hit_runtime_limit,
+                'num_lp_iters': num_lp_iters,
+                "num_mip_iters": n_iters - num_lp_iters,
+                'solve_type': self.solve_config.SECOND_OBJECTIVE.value,
+            }
+        )
+        if use_visualisation:
+            visualise_network_transformation(fig)
+            fig.write_html(
+                f"../images/{self.data['label']}_transformation_{self.solve_config.SECOND_OBJECTIVE.value}.html"
+            )
+        print(f"{self.statistics=}")
+
+    def add_solution_trace(self, fig: Figure | None=None):
+        if fig is None:
+            fig = Figure()
+        solution_charge_fragments = [
+            cf for cf in self.fragment_vars_by_charge_fragment if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > EPS
+        ]
+        visualise_charge_network(
+                    self.charge_depots,
                     [
                         (
                           self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
                         )
-                        for cf, _ in solution_charge_fragments
+                        for cf in solution_charge_fragments
                     ], 
-                    self.recharge_arcs.difference(prev_additions.new_recharge_arcs),
-                    # [arc for arc in self.recharge_arc_var_by_depot_store if getattr(self.recharge_arc_var_by_depot_store[arc], "x", -1) > EPS],
-                    prev_additions.depots_to_update,
-                    [(self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end) for cf in prev_additions.new_fragment_arcs],
-                    prev_additions.new_recharge_arcs.intersection(self.recharge_arcs),
-                ).show()#write_html("infeasible_step.html")
-
-                # self.forward_label(solution_charge_fragments, waiting_arcs)
-                # if first_time:
-                #     self.set_solution()
-                #     first_time=False
-                # else:
-                self.model.computeIIS()
-                self.model.write("fragment_network.ilp")
-                raise Exception("Relaxation is infeasible")
-        # TODO: enumerate the theoretical network size for a-priori approach
-        # assert self.model.objval == self._get_paper_objective_value()
-        visualise_charge_network(
-            [cd for d in self.charge_depots_by_depot for cd in self.charge_depots_by_depot[d]],
-            [
-                (
-                    self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
+                    [arc for arc in self.recharge_arc_var_by_depot_store if getattr(self.recharge_arc_var_by_depot_store[arc], "x", -1) > EPS],
+                   fig=fig,
+                   graph_type="Solution"
                 )
-                for cf, _ in solution_charge_fragments
-            ], 
-            [arc for arc in self.recharge_arc_var_by_depot_store if getattr(self.recharge_arc_var_by_depot_store[arc], "x", -1) > EPS],
-            network_additions.depots_to_update,
-            [(self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end) for cf in network_additions.new_fragment_arcs],
-            network_additions.new_recharge_arcs.intersection(self.recharge_arcs),
-        ).write_html(f"images/{self.data['label']}_solution.html")
-        print(f"solved in {n_iters} iterations")
-        print(f"{time_dict=}")
+        return fig
 
-    def change_variable_domain(self, var_type: str):
-        """Sets all variable vtypes to the given type"""
+    def add_inspection_trace(self, fig: Figure, network_additions: ValidationStore):
+        visualise_charge_network(
+                    network_additions.depots_to_update,
+                    [
+                        (
+                          self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
+                        )
+                        for cf in network_additions.new_fragment_arcs
+                    ], 
+                    network_additions.new_recharge_arcs.intersection(self.recharge_arcs),
+                    fig=fig,
+                    graph_type="Repair"
+                )
+
+    def _add_initial_network_cuts(self):
+        """Adds additional nodes prior to optimisation."""
+        # self._add_nodes_at_charge_level(int(np.percentile([cf.charge for cf in self.charge_fragments], 50)))
+        self._add_end_nodes_for_fragments()
+
+    def _change_variable_domain(self, var_type: str):
+        """
+        Sets all variable vtypes to the given type
+        """
         for var in self.fragment_vars_by_charge_fragment.values():
-            var.vType = var_type
-
+            var.VType = var_type
+        
+        # Can't have binary variables for the counts or recharge arcs
         if var_type == GRB.BINARY:
             var_type = GRB.INTEGER
+
         for var in self.recharge_arc_var_by_depot_store.values():
-            var.vType = var_type
+            var.VType = var_type
         for var in self.starting_counts.values():
-            var.vType = var_type
+            var.VType = var_type
         for var in self.finishing_counts.values():
-            var.vType = var_type
+            var.VType = var_type
+
+    def _get_travel_time_for_fragment(self, id: int) -> int:
+        """
+        Gets the travel time for a fragment from the data
+        """
+        if self.deadheading_time_by_fragment_cache.get(id) is None:
+            fragment = self.fragments_by_id[id]
+            travel_distance = (
+                self.depot_to_job_charge_matrix[fragment.start_depot_id][fragment.jobs[0].id]
+                + self.job_to_depot_charge_matrix[fragment.jobs[-1].id][fragment.end_depot_id]
+            )
+            self.deadheading_time_by_fragment_cache[id] = travel_distance
+        return self.deadheading_time_by_fragment_cache[id]
 
     def validate_timed_network(self):
         """
@@ -817,26 +1190,27 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         - No timed depot can have fragments which start after its time
         - Each timed depot cannot have a time earlier than the previous timed depot
         """
-        num_recharge_in_per_charge_depot: dict[ChargeDepot] = defaultdict(int)
-        num_recharge_out_per_charge_depot: dict[ChargeDepot] = defaultdict(int)
         for depot_id, charge_depots in self.charge_depots_by_depot.items():
-            prev_td = None
+            prev_td = ChargeDepot(id=depot_id, time=0, charge=0)
             for td in sorted(charge_depots):
                 if prev_td:
                     assert td.time >= prev_td.time
-                    if td.time <= prev_td.time:
+                    if td.time < prev_td.time:
                         print(f"Depot {td} has a time earlier than the previous depot.")
                         return False
                 fragments = self.charge_fragments_by_charge_depot[td]
                 # Check the following:
                 # min end time >= max start time
                 # no start time later than the current depot time and no earlier than the previous time.
-                departure_fragments = [f for f in fragments if ChargeDepot(charge=f.start_charge, time=f.start_time, id=f.start_depot_id) == td]
-                arrival_fragments = [f for f in fragments if ChargeDepot(charge=f.start_charge, time=f.start_time, id=f.start_depot_id) != td]
-                if len(arrival_fragments) != 0:
-                    assert all(prev_td.time <= tf.start_time <= td.time for tf in departure_fragments)
+                departure_fragments = [cf for cf in fragments if cf.start_charge_depot == td]
+                arrival_fragments = [cf for cf in fragments if cf.start_charge_depot != td]
                 if len(departure_fragments) != 0:
-                    assert all(prev_td.time <= tf.end_time <= td.time for tf in arrival_fragments)
+                    assert all(prev_td.time <= tf.start_time <= td.time for tf in departure_fragments)
+                if len(arrival_fragments) != 0:
+                    for tf in arrival_fragments:
+                        end_depot = self._get_first_depot_vehicle_can_leave_from(tf.end_charge_depot)
+                        assert prev_td.time <= end_depot.time <= td.time
+                    # assert all(prev_td.time <= self._get_first_depot_vehicle_can_leave_from(tf.end_charge_depot).time <= td.time for tf in arrival_fragments)
                 if len(departure_fragments) != 0 and len(arrival_fragments) != 0:
                    max_arr = max(tf.end_time for tf in arrival_fragments) 
                    min_dep = min(tf.start_time for tf in departure_fragments)
@@ -858,21 +1232,27 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                     if arc.end is None:
                         assert charge_depot.time == self.end_times_by_depot[charge_depot.id]
                         continue
-                    assert arc.end.time == self._get_next_time_from_depot(charge_depot.id, charge_depot.time)
+                    dep_idx = bisect.bisect_right(self.departure_times_by_depot[charge_depot.id], charge_depot.time)
+                    arr_idx = bisect.bisect_right(self.arrival_times_by_depot[charge_depot.id], charge_depot.time)
+                    # No time greater
+                    if dep_idx == len(self.departure_times_by_depot[charge_depot.id]):
+                        dep_time = 1e10
+                    else:
+                        dep_time = self.departure_times_by_depot[charge_depot.id][dep_idx]
+                    if arr_idx == len(self.arrival_times_by_depot[charge_depot.id]):
+                        arr_time = 1e10
+                    else:
+                        arr_time = self.arrival_times_by_depot[charge_depot.id][arr_idx]
+                    next_time = min(
+                        arr_time, dep_time
+                    )
+                    assert arc.end.time == next_time, f"{arc.end.time=}, {self._get_next_departure_time_from_depot(charge_depot.id, charge_depot.time)=}"
                     assert arc.end.charge >= arc.start.charge
                     charge_depot = arc.end
                     has_neighbour = True
 
-    def visualise_solution(
-            self,
-            sol_routes: list[list[ChargeDepot | Fragment]],
-            corrected_routes: list[list[ChargeDepot | Fragment]],
-        ) -> None:
-        """Visualises a solution to the linaer relaxation."""
-
-    def _get_paper_objective_value(self) -> float:
-
-        data = pd.read_excel(r"mdevs/data/mdevs_solutions.xlsx", sheet_name=None)
+    def _get_paper_objective_value(self, path = r"data/mdevs_solutions.xlsx") -> float:
+        data = pd.read_excel(path, sheet_name=None)
         instance_type = "regular" if "000" not in self.data["label"] else 'large' 
         for sheet in data:
             if instance_type in sheet:
@@ -883,38 +1263,64 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             f"ID_instance == {self.data['ID']} and battery_charging == 'non-linear'"
         )["objective_value"].values[0]
 
+    def _calculate_upper_bound_on_network_size(self) -> None:
+        """
+        Calculates the number of nodes in the network required of an a-priori solve.  
+        To determine this number, we need to consider the following:
+        From the initial network: 
+        - iterate through the existing charge fragments
+        - add each end node, keep track of everything new that was added with ValidationStore.
+        - repeat with new charge_fragments from last iteration until no new arcs are added.
+        - use add_repair_trace with each iteration.       
+        """
+        store = ValidationStore()
+        fig = Figure()
+        for cf in list(self.charge_fragments):
+            self._add_new_depot(cf.end_charge_depot, store=store)
+        while len(store.new_fragment_arcs) > 0:
+            new_store = ValidationStore()
+            for cf in store.new_fragment_arcs:
+                self._add_new_depot(cf.end_charge_depot, store=new_store)
+            self.add_inspection_trace(fig=fig, network_additions=new_store)
+            self.add_inspection_trace(fig=fig, network_additions=new_store)
+            store = new_store             
+        visualise_network_transformation(fig).write_html(f"../images/a_priori_generation_{self.data['label']}.html")
+        self.statistics.update(
+            {
+                "a_priori_charge_network_arcs": len(self.charge_fragments) + len(self.recharge_arcs),
+                "a_priori_charge_network_nodes": len(self.charge_depots)
+            }
+        )
 
-    def run(self):
+    def run(self, output_path: str = None):
         """Runs an end-to-end solve ."""
         print(f"Solving {self.data['label']}...")
         print("generating fragments...")
         self.generate_fragments()
         print("generating timed network...")
-        self.generate_timed_network()
+        with cProfile.Profile() as profile:
+            self.generate_timed_network()
+            profile.create_stats()
+            profile.dump_stats("network_gen_profile_old_next_time.prof")
         print("validating timed network...")
         self.validate_timed_network()
-        # from mdevs.utils.visualiser import visualise_charge_network
-        # visualise_charge_network(
-        #     [cd for d in self.charge_depots_by_depot for cd in self.charge_depots_by_depot[d]],
-        #     [
-        #         (
-        #             ChargeDepot(id=cf.start_depot_id, time=cf.start_time, charge=cf.start_charge),
-        #             ChargeDepot(id=cf.end_depot_id, time=cf.end_time, charge=cf.end_charge)
-        #         )
-        #         for cf in self.charge_fragments
-        #     ], 
-        #     self.recharge_arcs, 
-        # ).show()
         print("building model...")
         self.build_model()
         print("solving...")
         with cProfile.Profile() as profile:
             self.solve()
             profile.create_stats()
-            profile.dump_stats("solve_profile_large_instance.prof")
+            profile.dump_stats("solve_profile_old_next_time.prof")
         # print("sequencing routes...")
         # routes = self.create_routes()
+        # Final network size
+        self.statistics.update(
+            {
+                "final_charge_network_arcs": len(self.charge_fragments) + len(self.recharge_arcs),
+                "final_charge_network_nodes": len(self.charge_depots)
+            }
+        )
+        # self._calculate_upper_bound_on_network_size()
 
-        # print("validating solution...")
-        # self.validate_solution(routes, self.model.objval, triangle_inequality=False)
-        self.write_statistics()
+        if output_path is not None:
+            self.write_statistics(file=output_path)

@@ -10,10 +10,15 @@ from mdevs.formulations.base import *
 
 T = TypeVar("T")
 
+class ConstantTimeStatistics(FragmentStatistics):
+    timed_network_compression: float
+    compressed_network_nodes: int
+
 class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
     TYPE = "constant-charging"
-    def __init__(self, file: str, params: dict={}) -> None:
-        super().__init__(file, params=params)
+    def __init__(self, file: str, config=CalculationConfig()) -> None:
+        super().__init__(file, config=config)
+        self.statistics: ConstantTimeStatistics = ConstantTimeStatistics(**self.statistics)
         
     def _get_jobs_reachable_from(self, charge: int, job: Job) -> list[Job]:
         """
@@ -67,8 +72,9 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         
         self.statistics.update(
             {
-                "timed_network_generation": time.time() - time0,
-                "timed_network_size": sum(len(v) for v in self.timed_fragments_by_depot_by_time.values())
+                "initial_timed_network_generation": time.time() - time0,
+                "initial_timed_network_nodes": sum(len(v) for v in self.timed_fragments_by_depot_by_time.values()),
+                "initial_timed_network_arcs": len(self.fragment_set)
             }
         )
         

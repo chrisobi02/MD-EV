@@ -11,6 +11,7 @@ from gurobipy import Model, GRB, quicksum
 from dataclasses import dataclass
 from enum import Enum
 import heapq
+from typing import TypedDict
 
 T = TypeVar("T")
 
@@ -21,6 +22,21 @@ class Flow(Enum):
 
 UNREACHABLE = -1
 EPS = 1e-6
+
+class Statistics(TypedDict):
+    num_fragments: int = None
+    objective: int = None
+    runtime: float = None
+    label: str = None
+    gap: int = None
+
+class FragmentStatistics(Statistics):
+    type: str = None
+    num_fragments: int = None
+    fragment_generation_time: float = None
+    initial_timed_network_generation: float = None
+    initial_timed_network_nodes: int = None
+    initial_timed_network_arcs: int = None
 
 @dataclass()
 class CalculationConfig:
@@ -182,8 +198,9 @@ class Label:
     uncompressed_end_depot: ChargeDepot | ChargeDepot
     end_depot: ChargeDepot | ChargeDepot
     flow: float | int
-    f_id: int | None # Fragment id
-    prev_label: 'Label | None'
+    f_id: int | None  = None# Fragment id
+    f_charge: int | None = None
+    prev_label: 'Label | None' = None
 
     def __lt__(self, other: 'Label') -> bool:
         if self.uncompressed_end_depot != other.uncompressed_end_depot:
@@ -226,7 +243,8 @@ class Arc:
     end_depot: ChargeDepot | ChargeDepot # Target depot
     start_depot: ChargeDepot | ChargeDepot 
     flow: float # Number of vehicles
-    f_id: int | None # Fragment id
+    f_id: int | None = None # Fragment id
+    f_charge: int | None = None
 
 @dataclass()
 class Route:
@@ -242,13 +260,52 @@ class Route:
         """Creates a Route from a list of timed fragments/depots."""
         raise NotImplementedError()
 
+class ChargeCalculator(ABC):
+    """
+    Abstract class which defines the methods required to calculate the charge and time cost for a given MDEVS instance.
+    dilation_factor is based off the assumption of 100% charge being the maximum charge,
+    and PERCENTAGE_CHARGE_PER_UNIT being half a charge unit.
+    This allows one to experiment with the same overall charge function while dilating it to have different absolute capacities
+    Similary, the discretise parameter allows for using the same charge function in rounded or exact charge situations.
+    """
+    def __init__(self, config: CalculationConfig, discretise=True) -> None:
+        self.config = config
+        self.discretise = discretise
+        # % difference from an undiscretised maximum charge of 100%
+        self.dilation_factor = 2 * self.config.UNDISCRETISED_MAX_CHARGE / 100 * self.config.PERCENTAGE_CHARGE_PER_UNIT 
+
+
+    def get_charge(self, charge: int, recharge_time: int):
+        """
+        Determines the state of charge given a charge level and the amount of time it has to charge.
+        """
+        if recharge_time == 0:
+            return charge
+        
+        if recharge_time < 0:
+            return -1
+        
+        final_charge = self.get_charge_at_time(self.charge_inverse(charge) + recharge_time)
+        return final_charge
+
+    @abstractmethod
+    def get_charge_at_time(self, t: int) -> int:
+        """Returns the charge level from 0% when charging for t units of time."""
+        
+
+    @abstractmethod
+    def charge_inverse(self, charge: int):
+        """
+        Returns the time to charge to a certain level. This should work as an inverse to get_charge_at_time
+        """
+        
 
 class BaseMDEVCalculator(ABC):
     """
     Base class used to centralise data calculations across all model implementations
     """
     
-    def __init__(self, file: str, config: dict={}) -> None:
+    def __init__(self, file: str, config=CalculationConfig) -> None:
         """
         params: dictionary which specify overrides to the default CalculationParameter.
         """
@@ -264,8 +321,8 @@ class BaseMDEVCalculator(ABC):
         self.depots: list[Building] = list(self.depots_by_id.values())
         self.jobs_by_id: dict[int, Job] = self.to_dataclass_by_id(self.data["jobs"], Job, id_offset=len(self.depots_by_id))
         self.jobs: list[Job] = list(self.jobs_by_id.values())
-        self.config = CalculationConfig(**config)
-        self.statistics = {}
+        self.config = config
+        self.statistics: Statistics = Statistics(label=self.data['label'])
 
     def to_dataclass_by_id(
         self, json_data: list[dict], dataclass: T, id_field: str = "id", **kwargs
@@ -391,8 +448,8 @@ class BaseMDEVCalculator(ABC):
     
 class BaseFragmentGenerator(BaseMDEVCalculator):
     TYPE = None
-    def __init__(self, file: str, params: dict={}) -> None:
-        super().__init__(file, config=params)
+    def __init__(self, file: str, config: dict={}) -> None:
+        super().__init__(file, config=config)
         self.generate_cost_matrices()
         self.fragment_set: set[Fragment] = set()
         self.fragments_by_id: dict[int, Fragment] = {}
@@ -408,16 +465,19 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
         self.all_arcs_by_charge_depot = defaultdict(set[FrozenChargeDepotStore | ChargeFragment])
         self.model = Model("fragment_network")
         self.minimum_charge_by_time_by_depot: dict[tuple[int, int], int] = {}
-        self.statistics: dict[str, int | float] = {
-                "type": self.TYPE,
-                "label": self.data["label"],
-        }
+        self.statistics: FragmentStatistics = FragmentStatistics(type=self.TYPE, **self.statistics)
 
     def generate_cost_matrices(self):
         self.generate_building_distance_matrix()
         self.generate_job_cost_matrix()
         self.generate_job_to_depot_matrices()
         self.generate_depot_to_job_matrices()
+
+    @property
+    def charge_depots(self) -> set[ChargeDepot]:
+        return set(
+            charge_depot for charge_depots in self.charge_depots_by_depot.values() for charge_depot in charge_depots
+        )
 
     def generate_job_to_depot_matrices(self) -> None:
         """Generates the charge and time cost for going from a job to a depot. [job_id][depot_id]."""
@@ -687,11 +747,9 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                 {
                     "objective": self.model.objval,
                     "runtime": self.model.Runtime,
-                    "node_count": self.model.NodeCount,
                     "gap": self.model.MIPGap,
                 }
             )
-            print(self.model.objval)
 
     def forward_label(
             self,
@@ -714,7 +772,10 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
             start_depot, end_depot = (
                 self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
             )
-            arcs_by_charge_depot[start_depot].append(Arc(start_depot=start_depot, end_depot=end_depot, f_id=cf.id, flow=flow))     
+            arcs_by_charge_depot[start_depot].append(
+                Arc(start_depot=start_depot, end_depot=end_depot, f_id=cf.id, f_charge=cf.start_charge, flow=flow)
+            )
+                     
             if start_depot not in start_depots:
                 continue
             # Decompress the network such that a min heap on time is real. 
@@ -731,7 +792,8 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                         f_id=None,
                     ),
                     end_depot=end_depot,
-                    f_id=cf.id, 
+                    f_id=cf.id,
+                    f_charge=cf.start_charge,
                     uncompressed_end_depot=uncompressed_end_depot
                 )
             heapq.heappush(
@@ -765,7 +827,11 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                 while label.prev_label is not None:
                     route.append(label.end_depot)
                     if label.f_id is not None:
-                        route.append(self.fragments_by_id[label.f_id])
+                        route.append(
+                            ChargeFragment.from_fragment(
+                                start_charge=label.f_charge, fragment=self.fragments_by_id[label.f_id]
+                            )
+                        )
                     label = label.prev_label
                 route.append(label.end_depot)
                 routes.append(Route(route_list=route[::-1]))
@@ -788,7 +854,8 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                         end_depot=arc.end_depot,
                         prev_label=label,
                         flow=delta,
-                        f_id=arc.f_id
+                        f_id=arc.f_id,
+                        f_charge=arc.f_charge
                     )
                 )
 
@@ -958,11 +1025,9 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
             + sum(self.job_charge_matrix[j1.id][j2.id] for j1, j2 in zip(fragment.jobs, fragment.jobs[1:]))
             )
         if cumulative_charge != fragment.charge:
-            print(f"Fragment {fragment} has incorrect charge {cumulative_charge} != {fragment.charge}")
-            return None, None, False
+            raise ValueError(f"Fragment {fragment} has incorrect charge {cumulative_charge} != {fragment.charge}")
         if cumulative_charge > self.config.MAX_CHARGE:
-            print(f"Fragment {fragment} has charge exceeding maximum")
-            return None, None, False
+            raise ValueError(f"Fragment {fragment} has charge exceeding maximum")
         time = fragment.start_time 
         for j, job in enumerate(fragment.jobs):
             if j == 0:
@@ -980,8 +1045,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                 # print(f"Fragment {fragment} has negative charge")
                 return None, None, False
             if time > job.start_time:
-                print(f"Fragment {fragment} starts too late")
-                raise Exception()
+                raise ValueError(f"Fragment {fragment} starts too late")
             time = job.end_time
             
         time += self.job_to_depot_time_matrix[job.id][fragment.end_depot_id] + self.config.CHARGE_BUFFER
@@ -1007,7 +1071,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
             self.validate_job_sequences(routes)
         return True
     
-    def write_statistics(self, folder: str=None, file: str=None):
+    def write_statistics(self, file: str=None):
         """
         Writes the recorded statistics from the model run to a csv format.
         Records the following:
@@ -1015,14 +1079,16 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
         """
         # if stats is None:
         #     stats = self.statistics.keys()
-        if file:
+        if file is not None:
             df = pd.DataFrame([self.statistics])
             # open current csv, add an entry and exit.
             print(df)
             if os.path.exists(file):
-                print(pd.read_csv(file))
+                # print(pd.read_csv(file))
                 df = pd.concat([pd.read_csv(file, index_col=0), df], ignore_index=True)
-                print(df)
+                # print(df)
+            else:
+                file = open(file, 'w')
             # turn dictionary into df
             df.to_csv(file)
     

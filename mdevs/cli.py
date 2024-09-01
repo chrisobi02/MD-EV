@@ -7,6 +7,16 @@ import click
 from mdevs.formulations import *
 import cProfile
 
+NON_LINEAR_BASIC_CONFIG = CalculationConfig(
+    UNDISCRETISED_MAX_CHARGE=100,
+    RECHARGE_DELAY_IN_MINUTES=0.5,        
+)
+
+CONSTANT_TIME_BASIC_CONFIG = CalculationConfig(
+    UNDISCRETISED_MAX_CHARGE=100,
+)
+
+
 @click.group()
 def cli():
     pass
@@ -140,27 +150,62 @@ def non_linear_debug():
     directory = "mdevs/data/instances_large/"
 
     # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
-    json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
+    json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True) 
     EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
     click.echo(json_files)
     # Iterate over the list of filepaths & open each file
     for json_file in json_files:     
         if "fragments" in str(json_file):
             continue
-        if "100" not in str(json_file):
-        # if "50" not in str(json_file):
+        if "1000-01" not in str(json_file):
+        # if "100" not in str(json_file):
             continue
         print(f"Solving {json_file}...")
-        model = NonLinearFragmentGenerator(json_file, config={"RECHARGE_DELAY_IN_MINUTES": 0.5})
-        # profiler = cProfile.Profile()
+        model = NonLinearFragmentGenerator(
+            json_file, 
+            config=NON_LINEAR_BASIC_CONFIG,
+            solve_config=SolveConfig(
+                SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
+                INCLUDE_VISUALISATION=False,
+                MAX_ITERATIONS=5
+            )
+        )
         model.run()
-       
-        # break
-        # model.create_routes()
-        continue
 
-# @cli.command()
-# @click.option("--size", type=str, default="50")
+@cli.command()
+@click.argument("output_path", type=str)
+@click.option("--size", type=str, default="50") 
+@click.option("--exclude", type=str, default=None)
+def run_instances(output_path: str, size: str, exclude: str):
+    directories = ["data/instances_regular/", "data/instances_large/"]
+    for directory in directories:
+        # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
+        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True) 
+        EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
+        click.echo(json_files)
+        # Iterate over the list of filepaths & open each file
+        for json_file in json_files:     
+            if "fragments" in str(json_file):
+                continue
+            if exclude is not None and exclude in str(json_file):
+                continue
+            if size not in str(json_file):
+                continue
+            print(f"Solving {json_file}...")
+            model = NonLinearFragmentGenerator(
+                json_file,
+                config=NON_LINEAR_BASIC_CONFIG,
+                solve_config=SolveConfig(
+                    SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
+                    TIME_LIMIT=600,
+                    MAX_ITERATIONS=5
+                )
+            )
+            # profiler = cProfile.Profile()
+            model.run(output_path=output_path)
+
+@cli.command()
+@click.option("--size", type=str, default="50")
 def constant_time_single(size: str):
     directory = "mdevs/data/instances_large/"
     directory = "mdevs/data/instances_regular/"
@@ -262,17 +307,18 @@ def constant_time_naive_ip_run():
             } | generator.statistics
             json.dump(result_json, open(f"data/results/naive_ip_constant_run/{generator.data['label']}.json", "w"))
             
-# cli.add_command(constant_time_single)
-# cli.add_command(constant_time_run)
-# cli.add_command(non_linear_debug)
-# cli.add_command(constant_time_naive_ip_run)
+cli.add_command(constant_time_single)
+cli.add_command(constant_time_run)
+cli.add_command(non_linear_debug)
+cli.add_command(constant_time_naive_ip_run)
 
 
 if __name__ == "__main__":
     # constant_time_single("50")
-    # cli()
+    cli()
+    # non_linear_debug()
+    # run_non_linear_regular_instances("data/results/non_linear_run/s.csv", "1000", None)
     # constant_time_debug()
-    non_linear_debug()
     # constant_time_naive_ip_run()
     # compare_sequencing_procedures()
     # non_linear_debug()
