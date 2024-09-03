@@ -8,7 +8,7 @@ from mdevs.formulations import *
 import cProfile
 
 NON_LINEAR_BASIC_CONFIG = CalculationConfig(
-    UNDISCRETISED_MAX_CHARGE=100,
+    UNDISCRETISED_MAX_CHARGE=70,
     RECHARGE_DELAY_IN_MINUTES=0.5,        
 )
 
@@ -142,9 +142,8 @@ def constant_time_debug():
         routess = [r.route_list for r in new_routes]
         generator.validate_solution([r.route_list for r in new_routes], generator.model.objval)
 
-@cli.command()
-def non_linear_debug():   
-    click.echo("Running non-linear debug")
+def interpolation_debug():   
+    click.echo("Running intepolr debug")
       # Specify the directory you want to search
     directory = "mdevs/data/instances_regular/"
     directory = "mdevs/data/instances_large/"
@@ -161,16 +160,87 @@ def non_linear_debug():
         # if "100" not in str(json_file):
             continue
         print(f"Solving {json_file}...")
+        model = InterpolationIP(
+            json_file, 
+            # charge_calculator_class=ConstantChargeFunction,
+            config=CONSTANT_TIME_BASIC_CONFIG,
+        )
+        routes = model.run()
+
+
+        # model = NonLinearFragmentGenerator(
+        #     json_file, 
+        #     config=NON_LINEAR_BASIC_CONFIG,
+        #     solve_config=SolveConfig(
+        #         SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
+        #         INCLUDE_VISUALISATION=False,
+        #     )
+        # )
+        # # all_prior_fragments = set(f for s in prior_solution for f in s)
+        # # # get fragments associated with a timed depot
+        # data = pd.read_excel("mdevs/data/mdevs_solutions.xlsx", sheet_name=None)
+        # instance_type = "regular_BCH" if "000" not in model.data["label"] else 'large' 
+        # for sheet in data:
+        #     if instance_type in sheet:
+        #         data = data[sheet]
+        #         break
+        # obj = data.query(
+        #     f"ID_instance == {model.data['ID']} and battery_charging == 'constant-time'"
+        # )["objective_value"].values[0]
+
+        # assert model.model.objval == obj
+    
+@cli.command()
+def non_linear_debug():   
+    click.echo("Running non-linear debug")
+      # Specify the directory you want to search
+    directory = "mdevs/data/instances_regular/"
+    directory = "mdevs/data/instances_large/"
+
+    # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
+    json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True) 
+    EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
+    click.echo(json_files)
+    # Iterate over the list of filepaths & open each file
+    for json_file in json_files:     
+        if "fragments" in str(json_file):
+            continue
+        # if "200-01" not in str(json_file):
+        if "1000-03" not in str(json_file):
+            continue
+        print(f"Solving {json_file}...")
+        # model = ConstantTimeFragmentGenerator(
+        #     json_file, 
+        #     config=CONSTANT_TIME_BASIC_CONFIG,
+        # )
+        # model.generate_fragments()
+
         model = NonLinearFragmentGenerator(
             json_file, 
             config=NON_LINEAR_BASIC_CONFIG,
             solve_config=SolveConfig(
                 SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
                 INCLUDE_VISUALISATION=False,
-                MAX_ITERATIONS=5
             )
         )
-        model.run()
+        # # all_prior_fragments = set(f for s in prior_solution for f in s)
+        # # get fragments associated with a timed depot
+        routes = model.run()
+        # with cProfile.Profile() as profile:
+        #     profile.create_stats()
+        #     profile.dump_stats("constant_run_profile.prof")
+        data = pd.read_excel("mdevs/data/mdevs_solutions.xlsx", sheet_name=None)
+        # instance_type = "large_BCH"# if "000" not in model.data["label"] else 'large_BCH' 
+        # instance_type = "regular_BCH" if "000" not in model.data["label"] else 'large_BCH' 
+        # for sheet in data:
+        #     if instance_type in sheet:
+        #         data = data[sheet]
+        #         break
+        # obj = data.query(
+        #     f"ID_instance == {model.data['ID']} and battery_charging == 'non-linear'"
+        # )["objective_value"].values[0]
+
+        # assert model.model.objval == len(routes) == obj
 
 @cli.command()
 @click.argument("output_path", type=str)
@@ -198,11 +268,26 @@ def run_instances(output_path: str, size: str, exclude: str):
                 solve_config=SolveConfig(
                     SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
                     TIME_LIMIT=600,
-                    MAX_ITERATIONS=5
+                    # MAX_ITERATIONS=5
                 )
             )
-            # profiler = cProfile.Profile()
+            # data = pd.read_csv(output_path)
+            # if model.data["label"] in data["label"].values:
+            #     print(f"Skipping {model.data['label']}")
+            #     continue
             model.run(output_path=output_path)
+
+            # data = pd.read_excel("data/mdevs_solutions.xlsx", sheet_name=None)
+            # instance_type = "regular" if "000" not in model.data["label"] else 'large' 
+            # for sheet in data:
+            #     if instance_type in sheet:
+            #         data = data[sheet]
+            #         break
+            # obj = data.query(
+            #     f"ID_instance == {model.data['ID']} and battery_charging == 'constant-time'"
+            # )["objective_value"].values[0]
+            # profiler = cProfile.Profile()
+            # assert model.model.objval == obj
 
 @cli.command()
 @click.option("--size", type=str, default="50")
@@ -260,6 +345,7 @@ def constant_time_run():
         for json_file in json_files:     
             if "fragments" in str(json_file):
                 continue        
+            print(json_file)
             generator = ConstantTimeFragmentGenerator(json_file)
             generator.generate_fragments()#file=str_frag_file)
             generator.generate_timed_network()
@@ -270,9 +356,22 @@ def constant_time_run():
             print("solving...")
             generator.solve()
             print("sequencing routes...")
-            routes = generator.forward_label()
+            routes = generator.run()
             print(f"Fragment routes: {len(routes)}")
             generator.validate_solution([r.route_list for r in routes], generator.model.objval)
+            
+            data = pd.read_excel("data/mdevs_solutions.xlsx", sheet_name=None)
+            instance_type = "regular" if "000" not in generator.data["label"] else 'large' 
+            for sheet in data:
+                if instance_type in sheet:
+                    data = data[sheet]
+                    break
+            obj = data.query(
+                f"ID_instance == {generator.data['ID']} and battery_charging == 'constant-time'"
+            )["objective_value"].values[0]
+
+            assert generator.model.objval == obj
+
             result_json = {
                 "label": json_file.split("/")[-1].split(".")[0],
                 "method": "constant_time",
@@ -292,7 +391,6 @@ def constant_time_naive_ip_run():
         for json_file in json_files:     
             if "fragments" in str(json_file):
                 continue
-
             generator = NaiveIP(json_file)
             # generator.model.setParam("OutputFlag", 0)\
             print(f"solving {json_file}")
@@ -315,8 +413,9 @@ cli.add_command(constant_time_naive_ip_run)
 
 if __name__ == "__main__":
     # constant_time_single("50")
+    non_linear_debug()
+    # interpolation_debug()
     cli()
-    # non_linear_debug()
     # run_non_linear_regular_instances("data/results/non_linear_run/s.csv", "1000", None)
     # constant_time_debug()
     # constant_time_naive_ip_run()

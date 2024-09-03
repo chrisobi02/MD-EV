@@ -7,6 +7,7 @@ from typing import TypeVar
 import glob
 
 from mdevs.formulations.base import *
+from mdevs.formulations.charge_functions import ConstantChargeFunction
 
 T = TypeVar("T")
 
@@ -17,48 +18,48 @@ class ConstantTimeStatistics(FragmentStatistics):
 class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
     TYPE = "constant-charging"
     def __init__(self, file: str, config=CalculationConfig()) -> None:
-        super().__init__(file, config=config)
+        super().__init__(file, ConstantChargeFunction, config=config)
         self.statistics: ConstantTimeStatistics = ConstantTimeStatistics(**self.statistics)
         
-    def _get_jobs_reachable_from(self, charge: int, job: Job) -> list[Job]:
-        """
-        Takes either a job or a depot and returns a set of jobs which can be reached from the input location.
-        Filters job which:
-            1. Are in the past
-            2. Can be executed with a battery swap (depot visit) in between
-            3. Cannot be executed with the current charge and reach a depot after (i.e. goes flat).
-        """
-        reachable_jobs = []
-        t = job.end_time
-        for next_job in self.jobs:
-            # 3.
-            charge_cost = next_job.charge + self.job_charge_matrix[job.id][next_job.id] + min(
-                self.job_to_depot_charge_matrix[next_job.id][depot.id]
-                for depot in self.depots_by_id.values()
-            )
-            if charge < charge_cost:
-                # Cannot reach job and recharge.
-                continue
-            # 1
-            arrival_time = t + self.job_time_matrix[job.id][next_job.id]
-            if next_job.start_time < arrival_time:
-                # Cannot reach job at start time
-                continue
+    # def _get_jobs_reachable_from(self, charge: int, job: Job) -> list[Job]:
+    #     """
+    #     Takes either a job or a depot and returns a set of jobs which can be reached from the input location.
+    #     Filters job which:
+    #         1. Are in the past
+    #         2. Can be executed with a battery swap (depot visit) in between
+    #         3. Cannot be executed with the current charge and reach a depot after (i.e. goes flat).
+    #     """
+    #     reachable_jobs = []
+    #     t = job.end_time
+    #     for next_job in self.jobs:
+    #         # 3.
+    #         charge_cost = next_job.charge + self.job_charge_matrix[job.id][next_job.id] + min(
+    #             self.job_to_depot_charge_matrix[next_job.id][depot.id]
+    #             for depot in self.depots_by_id.values()
+    #         )
+    #         if charge < charge_cost:
+    #             # Cannot reach job and recharge.
+    #             continue
+    #         # 1
+    #         arrival_time = t + self.job_time_matrix[job.id][next_job.id]
+    #         if next_job.start_time < arrival_time:
+    #             # Cannot reach job at start time
+    #             continue
 
-            recharge_time = min(
-                self.job_to_depot_time_matrix[job.id][depot.id]
-                + self.config.CHARGE_BUFFER
-                + self.depot_to_job_time_matrix[depot.id][next_job.id]
-                for depot in self.depots
-                if self.job_to_depot_charge_matrix[job.id][depot.id] <= charge
-            )
-            # 2.
-            if t + recharge_time <= next_job.start_time:
-                continue
+    #         recharge_time = min(
+    #             self.job_to_depot_time_matrix[job.id][depot.id]
+    #             + self.config.CHARGE_BUFFER
+    #             + self.depot_to_job_time_matrix[depot.id][next_job.id]
+    #             for depot in self.depots
+    #             if self.job_to_depot_charge_matrix[job.id][depot.id] <= charge
+    #         )
+    #         # 2.
+    #         if t + recharge_time <= next_job.start_time:
+    #             continue
 
 
-            reachable_jobs.append(next_job)
-        return reachable_jobs
+    #         reachable_jobs.append(next_job)
+    #     return reachable_jobs
 
     def generate_timed_network(self) -> None:
         """Creates the compressed time network for the current instance."""
@@ -116,6 +117,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                             charge_fragment = ChargeFragment.from_fragment(
                                 self.config.MAX_CHARGE, self.fragments_by_id[tf.id]
                             )
+                            self.charge_fragments.add(charge_fragment)
                             if tf.direction == Flow.DEPARTURE:
                                 self.charge_depots_by_charge_fragment[charge_fragment].start = timed_depot
                             else:
@@ -150,15 +152,8 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                 arc = FrozenChargeDepotStore(start=start, end=end)
                 self.recharge_arcs_by_charge_depot[start].add(arc)
                 self.recharge_arcs_by_charge_depot[end].add(arc)
-    
-        self.recharge_arcs = set.union(self.recharge_arcs_by_charge_depot.values())
-        
-        self.all_arcs_by_charge_depot: dict[ChargeDepot, set[FrozenChargeDepotStore | ChargeFragment]] = {
-            charge_depot: set(
-                *self.recharge_arcs_by_charge_depot[charge_depot], *self.timed_fragments_by_charge_depot[charge_depot]
-            )
-            for depot in self.charge_depots_by_depot for charge_depot in self.charge_depots_by_depot[depot] 
-        }
+                self.recharge_arcs.add(arc)
+
 
         self.statistics.update(
             {
@@ -168,7 +163,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         )       
     
     def get_validated_timed_solution(
-            self, solution: list[list[int]], expected_vehicles: int | None=None
+            self, solution: list[set[ChargeFragment]], expected_vehicles: int | None=None
         ) -> list[list[ChargeDepot | Fragment]]:
         """
         Validates the prior solution to ensure its feasbility.
@@ -182,11 +177,12 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         # Convert into a timed network solution.
         for route_fragments in solution:
             converted_route = []
-            fragments = list(route_fragments)
-            for i, f_id in enumerate(fragments):
-                fragment = self.fragments_by_id[f_id]
+            # fragments = list(route_fragments)
+            for i, charge_fragment in enumerate(route_fragments):
+                # fragment = self.fragments_by_id[f_id]
+                f_id = charge_fragment.id
                 # Get start/end 
-                s_td, e_td = self.charge_depots_by_charge_fragment[f_id].start, self.charge_depots_by_charge_fragment[f_id].end
+                s_td, e_td = self.charge_depots_by_charge_fragment[charge_fragment].start, self.charge_depots_by_charge_fragment[charge_fragment].end
                 if i == 0:
                     # Add start -> first fragment waiting arcs, then between each pair:
                     waiting_gaps = sorted([td for td in self.charge_depots_by_depot[s_td.id] if td < s_td])
@@ -197,12 +193,12 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
 
                 if s_td not in converted_route:
                     converted_route.append(s_td)
-                converted_route.extend([fragment, e_td])
+                converted_route.extend([charge_fragment, e_td])
                 
                 new_depots = []
-                if i == len(fragments) - 1:
+                if i == len(route_fragments) - 1:
                     # Fill until end
-                    new_depots = [td for td in self.charge_depots_by_depot[fragment.end_depot_id] if e_td < td]                
+                    new_depots = [td for td in self.charge_depots_by_depot[charge_fragment.end_depot_id] if e_td < td]                
                     converted_route.extend(new_depots)
                 prev_td = e_td
             final_routes.append(converted_route)
@@ -285,7 +281,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                             for tf in self.timed_fragments_by_charge_depot[timed_depot]
                         )
                         + self.recharge_arc_var_by_depot_store[
-                            timed_depot, self.charge_depots_by_depot[depot][1]
+                            FrozenChargeDepotStore(start=timed_depot, end=self.charge_depots_by_depot[depot][1])
                         ],
                         name=name,
                     )
@@ -300,7 +296,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                             for tf in self.timed_fragments_by_charge_depot[timed_depot]
                         )
                         + self.recharge_arc_var_by_depot_store[
-                            self.charge_depots_by_depot[depot][-2], timed_depot
+                            FrozenChargeDepotStore(start=self.charge_depots_by_depot[depot][-2], end=timed_depot)
                         ],
                         name=name,
                     )
@@ -314,8 +310,12 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
                             ]
                             for tf in self.timed_fragments_by_charge_depot[timed_depot]
                         )
-                        + self.recharge_arc_var_by_depot_store[previous_timed_depot, timed_depot] 
-                        - self.recharge_arc_var_by_depot_store[timed_depot, next_timed_depot]
+                        + self.recharge_arc_var_by_depot_store[
+                            FrozenChargeDepotStore(start=previous_timed_depot, end=timed_depot)
+                        ] 
+                        - self.recharge_arc_var_by_depot_store[
+                            FrozenChargeDepotStore(start=timed_depot, end=next_timed_depot)
+                        ]
                         == 0,
                         name=name,
                     )
@@ -373,6 +373,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
 
         if triangle_inequality:
             self.validate_job_sequences(routes)
+        return True
     
     def validate_job_sequences(self, routes: list[list[ChargeDepot | Fragment]]):
         """
@@ -470,10 +471,30 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         print("building model...")
         self.build_model()
         print("solving...")
+        prior_solution, _ = self.read_solution(instance_type="large", sheet_name="results_large_BCH")
+        frags = []
+        for route in prior_solution:
+            cfs = []
+            for f_id in self.convert_route_to_fragments(route):
+                cfs.append(ChargeFragment.from_fragment(self.config.MAX_CHARGE, self.fragments_by_id[f_id]))
+            frags.append(cfs)
+        self.set_solution(frags, n_vehicles=len(prior_solution))
         self.solve()
         print("sequencing routes...")
-        routes = self.create_routes()
+        routes = self.forward_label(
+            {
+                (cf, var.x) 
+                for cf, var in self.fragment_vars_by_charge_fragment.items() 
+                if var.x > VAR_EPS 
+            },
+            {
+                (arc.start, arc.end, var.x)
+                for arc, var in self.recharge_arc_var_by_depot_store.items() 
+                if var.x > VAR_EPS
+            },
+        )
 
         print("validating solution...")
-        self.validate_solution(routes, self.model.objval, triangle_inequality=False)
+        self.validate_solution([r.route_list for r in routes], self.model.objval, triangle_inequality=False)
         self.write_statistics()
+        return routes

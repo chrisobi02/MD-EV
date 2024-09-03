@@ -12,6 +12,8 @@ import bisect
 from mdevs.formulations.base import CalculationConfig
 from mdevs.utils.visualiser import visualise_charge_network, visualise_network_transformation
 from mdevs.formulations.base import *
+from mdevs.formulations.charge_functions import PaperChargeFunction
+from gurobipy import Constr
 
 class SecondObjectives(Enum):
     """
@@ -56,39 +58,6 @@ class NonLinearStatistics(TypedDict):
     a_priori_charge_network_arcs: int = None
     invalid_route_segments: int = 0
 
-class PaperChargeFunction(ChargeCalculator):
-    """
-    Implements the charging function as described in the paper
-    """
-
-    def get_charge_at_time(self, t: int) -> int:
-        """returns the charge level from 0% when charging for t units of time as outlined in the paper."""
-        if t <= 80:
-            charge = 2 * t
-        elif t <= 160:
-            charge = 640/3 - ((12800 / 9) / (t - 160 / 3))
-        else:
-            charge = 200
-
-        if charge * self.dilation_factor > self.config.MAX_CHARGE:
-            raise ValueError(f"Charge level {charge} exceeds the maximum charge level")
-        val = charge * self.dilation_factor
-        if self.discretise:
-            val = math.floor(val)
-        return val
-    
-    def charge_inverse(self, charge: int):
-        """Returns the time to charge to a certain level"""
-        if charge <= 160 * self.dilation_factor:
-            t = charge / (2 * self.dilation_factor)
-        elif charge < 200 * self.dilation_factor:
-            t = 160 * (charge * self.dilation_factor - 240) / (3 * charge - 640* self.dilation_factor)
-        else:
-            t = 160 / self.dilation_factor
-        if self.discretise:
-            t = math.ceil(t)
-        return t
-
 class NonLinearFragmentGenerator(BaseFragmentGenerator):
     TYPE="non-linear"
     def __init__(
@@ -105,9 +74,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         This is so the calculation config can be passed in during initialisation of the class instead of passing it in at two points.
         charge_calculator_kwargs are any additional arguments to be passed to the charge_calculator_class specific to an implementation.
         """
-        super().__init__(file, config=config)
+        super().__init__(file, charge_calculator_class, config=config, charge_calculator_kwargs=charge_calculator_kwargs)
         self.solve_config = solve_config
-        self.charge_calculator: ChargeCalculator = charge_calculator_class(config=config, **charge_calculator_kwargs)
         self.charge_fragments_by_charge_depot: dict[ChargeDepot, set[ChargeFragment]] = defaultdict(set[ChargeFragment])
         self.charge_fragments_by_id: dict[int, set[ChargeFragment]] = defaultdict(set[ChargeFragment])
         self.charge_depots_by_depot: dict[int, set[ChargeDepot]] = defaultdict(set)
@@ -116,92 +84,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.next_time_after_depot_time_cache: dict[tuple[int, int], int] = {}
         self.deadheading_time_by_fragment_cache: dict[int, int] = {}
         self.statistics = NonLinearStatistics(**self.statistics)
-
-    def get_charge_at_time(self, t: int) -> int:
-        """returns the charge level from 0% when charging for t units of time as outlined in the paper."""
-        if t <= 80:
-            charge = 2 * t
-        elif t <= 160:
-            charge = 640/3 - ((12800 / 9) / (t - 160 / 3))
-        else:
-            charge = 200
-
-        if charge * self.dilation_factor > self.config.MAX_CHARGE:
-            raise ValueError(f"Charge level {charge} exceeds the maximum charge level")
-        val = math.floor(charge * self.dilation_factor)
-        return val
-    
-    def charge_inverse(self, charge: int):
-        """Returns the time to charge to a certain level"""
-        if charge <= 160 * self.dilation_factor:
-            t = charge / (2 * self.dilation_factor)
-        elif charge < 200 * self.dilation_factor:
-            t = 160 * (charge * self.dilation_factor - 240) / (3 * charge - 640* self.dilation_factor)
-        else:
-            t = 160 / self.dilation_factor
-        return math.ceil(t)
-
-    def _get_jobs_reachable_from(
-            self,
-            charge: int,
-            job: Job,
-            current_sequence: list[Job]=[],
-        ) -> set[Fragment]:
-        """
-        Generates a fragment starting at a given job and depot with a given charge at a given time.
-        The three conditions that must be satisfied are:
-        1. The candidate job must be reachable before its start time.
-        2. The candidate job must be able to reach a depot from the new job.
-        3. A detour to a depot will not result in the vehicle reaching the job with a higher charge than it would have directly.
-        """
-        reachable_jobs = []
-        job_end_time = job.end_time
-        for next_job in self.jobs:
-            # Filter out jobs already covered
-            if job == next_job:
-                continue
-
-            # 1.
-            arrival_time = job_end_time + self.job_time_matrix[job.id][next_job.id]
-            if next_job.start_time < arrival_time:
-                continue
-
-            # 2.
-            charge_cost = next_job.charge + self.job_charge_matrix[job.id][next_job.id] + min(
-                self.job_to_depot_charge_matrix[next_job.id][depot.id]
-                for depot in self.depots_by_id.values()
-            )
-            if charge < charge_cost:
-                continue
-            
-            # Find the depot with the minimum time to traverse from job, then back to next job
-            closest_depot = min(
-                self.depots, 
-                key=(
-                    lambda depot: self.job_to_depot_time_matrix[job.id][depot.id]
-                    + self.depot_to_job_time_matrix[depot.id][next_job.id]
-                )
-            )
-            recharge_time = (
-                next_job.start_time 
-                - job_end_time
-                - self.job_to_depot_time_matrix[job.id][closest_depot.id] 
-                - self.depot_to_job_time_matrix[closest_depot.id][next_job.id]
-                - self.config.CHARGE_BUFFER
-            )
-
-            # 3.
-            detour_charge = (
-                self.get_charge(charge - self.job_to_depot_charge_matrix[job.id][closest_depot.id], recharge_time)
-                - self.depot_to_job_charge_matrix[closest_depot.id][next_job.id]
-            )
-            direct_charge = charge - self.job_charge_matrix[job.id][next_job.id]
-            if detour_charge > direct_charge:
-                # Can reach job with a higher charge than if it were reached directly
-                continue
-            reachable_jobs.append(next_job)
-
-        return reachable_jobs
+        self.invalid = set() #TODO: REMOVE THIS IS A DEBUG TOOL
+        self.ip_cuts: dict[tuple[ChargeFragment, ...], Constr] = {}
 
     def generate_timed_network(self) -> None:
         """
@@ -366,8 +250,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         prev_time=prev_location.time
         for i, curr_location in enumerate(route[1:]):
             # If only charge depots remain, then the route is valid
-            if all(isinstance(loc, ChargeDepot) for loc in route[i+1:]):
-                break
+            # if all(isinstance(loc, ChargeDepot) for loc in route[i+1:]):
+            #     break
             match prev_location, curr_location:
                 case ChargeDepot(), ChargeDepot():
                     # recharge arc
@@ -461,6 +345,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         has_violations = False
         nodes_to_update = set()
         n_added = 0
+        invalid_in_iter = set()
         for route in routes:
             for i, (curr, next) in enumerate(zip(route.route_list, route.route_list[1:])):
                 if not (isinstance(curr, ChargeDepot) and isinstance(next, Fragment)):
@@ -469,13 +354,18 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 is_valid, segment = self.validate_route(route_segment, start_charge=curr.charge)
                 if is_valid:
                     break
-
+                if tuple(segment) in self.invalid and tuple(segment) not in invalid_in_iter:
+                    pass
+                if segment == [ChargeDepot(id=1, time=61, charge=140), ChargeFragment(id=168, jobs=(Job(id=10, start_time=62, end_time=103, charge=51, building_start_id=1, building_end_id=2, start_location=(113, 134), end_location=(124, 60), id_offset=2), Job(id=18, start_time=116, end_time=148, charge=34, building_start_id=0, building_end_id=2, start_location=(62, 171), end_location=(25, 15), id_offset=2)), start_time=61, end_time=160.0, start_depot_id=1, end_depot_id=0, charge=100, start_charge=140), ChargeDepot(id=0, time=168, charge=51), ChargeFragment(id=143, jobs=(Job(id=27, start_time=169, end_time=197, charge=35, building_start_id=0, building_end_id=2, start_location=(62, 171), end_location=(71, 77), id_offset=2),), start_time=168, end_time=212.0, start_depot_id=0, end_depot_id=1, charge=44, start_charge=51), ChargeDepot(id=1, time=234, charge=47), ChargeDepot(id=1, time=237, charge=140), ChargeDepot(id=1, time=239.0, charge=140), ChargeDepot(id=1, time=241.0, charge=140), ChargeDepot(id=1, time=247, charge=140), ChargeFragment(id=29, jobs=(Job(id=44, start_time=249, end_time=299, charge=51, building_start_id=1, building_end_id=2, start_location=(131, 2), end_location=(176, 191), id_offset=2),), start_time=247, end_time=316.0, start_depot_id=1, end_depot_id=1, charge=61, start_charge=140)]:
+                    pass
+                invalid_in_iter.add(tuple(segment))
+                self.invalid.add(tuple(segment))
                 nodes_to_update.update(self.amend_violated_route(segment, store=store))       
                 has_violations = True
                 n_added += 1
         if n_added > 0:
             self.statistics["invalid_route_segments"] += 1
-            print(f"violations: {n_added=}")
+            print(f"    violations: {n_added=}")
         
        # Update model to reflect new arcs and nodes.
         for node in store.depots_to_update:
@@ -560,14 +450,14 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                     curr_charge < self._get_min_fragment_charge_from_depot(curr_location.id, curr_location.time)
                     and isinstance(prev_location, Fragment)
                 ):
-                    new_depot = self._get_first_depot_vehicle_can_leave_from(
-                        ChargeDepot(id=curr_location.id, time=curr_location.time, charge=curr_charge)
-                    )
+                    new_depot = self._get_first_depot_vehicle_can_leave_from(new_depot)
 
                 if new_depot in self.charge_depots_by_depot[new_depot.id]:
                     prev_location = curr_location
                     continue
 
+                if new_depot == ChargeDepot(id=1, time=234, charge=39):
+                    pass
                 nodes_to_update.update(
                     self._add_new_depot(new_depot, store=store)
                 )
@@ -591,28 +481,31 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         """
         Returns the first charge depot with enough charge to execute a fragment
         """
+        start_time = new_time = charge_depot.time
+        start_charge = charge_depot.charge
+        curr_charge = start_charge
         min_charge = self._get_min_fragment_charge_from_depot(charge_depot.id, charge_depot.time)
         max_iters = len(self.departure_times_by_depot[charge_depot.id])
-        iters =0
+        iters = 0
         while (
-            (charge_depot.charge < min_charge
-            or min_charge == -1)
+            (curr_charge < min_charge or min_charge == -1)
             and iters < max_iters
         ):
-            if charge_depot.charge < 0:
+            if curr_charge < 0:
                 raise ValueError(f"Charge depot {charge_depot} has negative charge")
-            new_time = self._get_next_departure_time_from_depot(charge_depot.id, charge_depot.time)
+            new_time = self._get_next_departure_time_from_depot(charge_depot.id, new_time)
             if new_time is None:
-                # Final point always has max charge
-                charge_depot = ChargeDepot(id=charge_depot.id, time=charge_depot.time, charge=self.config.MAX_CHARGE)
+                charge_depot = ChargeDepot(
+                    id=charge_depot.id, time=self.end_times_by_depot[charge_depot.id], charge=self.config.MAX_CHARGE
+                )
                 return charge_depot
-            new_charge = self.get_charge(charge_depot.charge, new_time - charge_depot.time)
-            charge_depot = ChargeDepot(id=charge_depot.id, time=new_time, charge=new_charge)
+            curr_charge = self.get_charge(start_charge, new_time - start_time)
             min_charge = self._get_min_fragment_charge_from_depot(charge_depot.id, new_time)
             iters+=1
         if iters == max_iters:
             raise ValueError(f"Could not find a depot with enough charge to execute a fragment from {charge_depot}")
-        return charge_depot
+        destination_depot = ChargeDepot(id=charge_depot.id, time=new_time, charge=curr_charge)
+        return destination_depot
 
     def _get_next_departure_time_from_depot(self, id: int, time: int) -> int | None:
         """
@@ -622,10 +515,10 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         if (id, time) in self.next_time_after_depot_time_cache:
             return self.next_time_after_depot_time_cache[id, time]
 
-        charge_depots = [cd.time for cd in self.charge_depots_by_depot[id] if cd.time > time]
-        next_time = min(charge_depots, default=None)
-        self.next_time_after_depot_time_cache[id, time] = next_time
-        return next_time
+        # charge_depots = [cd.time for cd in self.charge_depots_by_depot[id] if cd.time > time]
+        # next_time = min(charge_depots, default=None)
+        # self.next_time_after_depot_time_cache[id, time] = next_time
+        # return next_time
 
         times = self.departure_times_by_depot[id]
         idx = bisect.bisect_right(times, time)
@@ -708,6 +601,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 invalid_inbound_arcs.append(charge_fragment)
 
         for charge_fragment in invalid_inbound_arcs:
+            if charge_fragment.id == 143 and charge_fragment.start_charge == 51:
+                pass
             self.charge_fragments_by_charge_depot[prev_depot].remove(charge_fragment)
             self.charge_fragments_by_charge_depot[new_depot].add(charge_fragment)
             self.charge_depots_by_charge_fragment[charge_fragment].end = new_depot
@@ -723,12 +618,10 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             new_charge_fragment = ChargeFragment.from_fragment(
                 start_charge=new_depot.charge, fragment=charge_fragment
             )
+            if new_charge_fragment.id == 143 and new_charge_fragment.start_charge == 51:
+                pass
             first_depot_which_can_leave = self._get_first_depot_vehicle_can_leave_from(
-                ChargeDepot(
-                    id=charge_fragment.end_depot_id,
-                    time=new_charge_fragment.end_time,
-                    charge=new_charge_fragment.end_charge
-                )
+                new_charge_fragment.end_charge_depot
             )
             end_depot = self._get_closest_charge_depot(first_depot_which_can_leave)
 
@@ -991,6 +884,16 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             case SecondObjectives.MAX_DEADHEADING:
                 self._set_dead_heading_objective(sense="max")
     
+    def _ban_invalid_routes(self, routes: list[Route]) -> None:
+        """
+        Bans routes that are invalid from the model
+        """
+        for route in routes:
+            if not route.is_valid:
+                self.model.addConstr(
+                    quicksum(self.fragment_vars_by_charge_fragment[cf] for cf in route.route_list) == 0
+                )
+
     def solve(self):
         print("setting solve...")
         self.model.setParam("OutputFlag", 0)
@@ -1000,10 +903,10 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         valid_relaxation = False
         var_type = GRB.CONTINUOUS
         has_valid_lp_relaxation = False
-        n_iters = 1
+        n_iters = 0
         prev_obj = 0
-        num_lp_iters = 0
-        model_solve_time_key = "lp_runtime"if var_type == GRB.CONTINUOUS else "mip_runtime"
+        model_solve_time_key = "lp_runtime"
+        model_iter_key = "num_lp_iters" 
         if use_visualisation:
             fig = Figure()
         self.statistics.update(
@@ -1014,6 +917,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 "num_mip_iters": 0,
                 "lp_runtime": 0,
                 "mip_runtime": 0,
+                "initial_bound": 0,
+                "final_bound": 0,
                 "invalid_route_segments": 0,
             }
         )
@@ -1022,11 +927,12 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self._change_variable_domain(var_type)
         self.model.optimize()
         self.statistics["runtime"] += self.model.Runtime
+        self.statistics["initial_bound"] = self.model.objval
         self.statistics[model_solve_time_key] += self.model.Runtime
         # self.set_solution()
         vehicle_count = self.model.objval
         print(f"Initial solve took {self.model.Runtime}, {vehicle_count=}")#, paper: {self._get_paper_objective_value()}")
-        self.obj_constr = self.model.addConstr(quicksum(self.starting_counts.values()) == vehicle_count)
+        self.obj_constr = self.model.addConstr(quicksum(self.starting_counts.values()) == vehicle_count, name="objective_limit")
         while (
             not valid_relaxation 
             and n_iters < self.solve_config.MAX_ITERATIONS 
@@ -1034,7 +940,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         ):
             self._set_secondary_objective()
             n_iters += 1
-            print(f"    Starting iteration {n_iters}")
+            self.statistics[model_iter_key] += 1
+            print(f"Starting iteration {n_iters}")
             self._change_variable_domain(var_type)
             
             self.model.update()
@@ -1047,15 +954,15 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
                     (cf, self.fragment_vars_by_charge_fragment[cf].x) 
                     for cf in self.fragment_vars_by_charge_fragment 
-                    if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > EPS
+                    if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > VAR_EPS
                 }
-                if abs(self.model.objval - prev_obj) > EPS:
+                if abs(self.model.objval - prev_obj) > VAR_EPS:
                     prev_obj = self.model.objval
                     print("    ", self.model.objval)
                     
                 waiting_arcs = [
                     (arc.start, arc.end, self.recharge_arc_var_by_depot_store[arc].x) 
-                    for arc in self.recharge_arc_var_by_depot_store if self.recharge_arc_var_by_depot_store[arc].x > EPS
+                    for arc in self.recharge_arc_var_by_depot_store if self.recharge_arc_var_by_depot_store[arc].x > VAR_EPS
                 ]
                 if use_visualisation:
                     fig = self.add_solution_trace(fig=fig)
@@ -1069,19 +976,23 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 if use_visualisation:
                     self.add_inspection_trace(fig, network_additions)
                 self.statistics["inspection_time"] += inspection_time
-                # print(f"     Inspection took {inspection_time}, Solve took {self.model.Runtime}")
                 if valid_relaxation and not has_valid_lp_relaxation:
                     print("    Valid linear relaxation, changing to integer variables...")
-                    num_lp_iters = n_iters
                     var_type = GRB.BINARY
+                    self.model.setParam("outputFlag", 1)
                     model_solve_time_key = "mip_runtime"
+                    model_iter_key = "num_mip_iters"
                     has_valid_lp_relaxation = True
                     valid_relaxation = False
                 continue
             else:
-                self.model.computeIIS()
-                self.model.write("fragment_network.ilp")
-                raise Exception("Relaxation is infeasible")
+                # Hit a lower bound issue
+                if vehicle_count > len(self.jobs):
+                    self.model.computeIIS()
+                    self.model.write("fragment_network.ilp")
+                    raise Exception("Relaxation is infeasible")
+                vehicle_count += 1
+                self.obj_constr.RHS = vehicle_count
         
         hit_runtime_limit = (
             self.statistics["runtime"] + self.statistics['inspection_time'] >= self.solve_config.TIME_LIMIT 
@@ -1101,9 +1012,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 "num_iters": n_iters,
                 "objective": len(routes) if not hit_runtime_limit else -1,
                 'solved': not hit_runtime_limit,
-                'num_lp_iters': num_lp_iters,
-                "num_mip_iters": n_iters - num_lp_iters,
                 'solve_type': self.solve_config.SECOND_OBJECTIVE.value,
+                "final_bound": vehicle_count,
             }
         )
         if use_visualisation:
@@ -1117,7 +1027,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         if fig is None:
             fig = Figure()
         solution_charge_fragments = [
-            cf for cf in self.fragment_vars_by_charge_fragment if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > EPS
+            cf for cf in self.fragment_vars_by_charge_fragment if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > VAR_EPS
         ]
         visualise_charge_network(
                     self.charge_depots,
@@ -1127,7 +1037,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                         )
                         for cf in solution_charge_fragments
                     ], 
-                    [arc for arc in self.recharge_arc_var_by_depot_store if getattr(self.recharge_arc_var_by_depot_store[arc], "x", -1) > EPS],
+                    [arc for arc in self.recharge_arc_var_by_depot_store if getattr(self.recharge_arc_var_by_depot_store[arc], "x", -1) > VAR_EPS],
                    fig=fig,
                    graph_type="Solution"
                 )
@@ -1298,19 +1208,19 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         print("generating fragments...")
         self.generate_fragments()
         print("generating timed network...")
-        with cProfile.Profile() as profile:
-            self.generate_timed_network()
-            profile.create_stats()
-            profile.dump_stats("network_gen_profile_old_next_time.prof")
+        self.generate_timed_network()
+        # with cProfile.Profile() as profile:
+        #     profile.create_stats()
+        #     profile.dump_stats("network_gen_profile_new_next_time.prof")
         print("validating timed network...")
         self.validate_timed_network()
         print("building model...")
         self.build_model()
         print("solving...")
-        with cProfile.Profile() as profile:
-            self.solve()
-            profile.create_stats()
-            profile.dump_stats("solve_profile_old_next_time.prof")
+        # with cProfile.Profile() as profile:
+        self.solve()
+            # profile.create_stats()
+            # profile.dump_stats("solve_profile_no_all_depot_check.prof")
         # print("sequencing routes...")
         # routes = self.create_routes()
         # Final network size

@@ -13,299 +13,22 @@ from enum import Enum
 import heapq
 from typing import TypedDict
 
-T = TypeVar("T")
+from mdevs.formulations.models import *
+from mdevs.formulations.charge_functions import ChargeCalculator
 
-class Flow(Enum):
-    ARRIVAL = "ARRIVAL"
-    DEPARTURE = "DEPARTURE"
-    UNDIRECTED = "UNDIRECTED"
-
-UNREACHABLE = -1
-EPS = 1e-6
-
-class Statistics(TypedDict):
-    num_fragments: int = None
-    objective: int = None
-    runtime: float = None
-    label: str = None
-    gap: int = None
-
-class FragmentStatistics(Statistics):
-    type: str = None
-    num_fragments: int = None
-    fragment_generation_time: float = None
-    initial_timed_network_generation: float = None
-    initial_timed_network_nodes: int = None
-    initial_timed_network_arcs: int = None
-
-@dataclass()
-class CalculationConfig:
-    """
-    Parameters which define the calculations for a given MDEVS instance.
-    All distance measures are in metres. 
-    The default values are those used in the paper
-    """
-    UNDISCRETISED_MAX_CHARGE: int = 100
-    PERCENTAGE_CHARGE_PER_UNIT: float = 0.5
-    PERCENTAGE_CHARGE_PER_METRE: float = 5e-5 # 5% per km
-    TIME_UNIT_IN_MINUTES: float = 0.5
-    RECHARGE_DELAY_IN_MINUTES: int = 3
-    VEHICLE_MOVE_SPEED_PER_MINUTE: float = 1000 / 6 
-
-    @property
-    def MAX_CHARGE(self) -> int:
-        return int(self.UNDISCRETISED_MAX_CHARGE / self.PERCENTAGE_CHARGE_PER_UNIT)
-
-    @property
-    def CHARGE_PER_METRE(self) -> float:
-        return self.PERCENTAGE_CHARGE_PER_METRE * self.UNDISCRETISED_MAX_CHARGE / self.PERCENTAGE_CHARGE_PER_UNIT
-
-    @property
-    def VEHICLE_MOVE_SPEED_PER_UNIT(self) -> float:
-        return self.VEHICLE_MOVE_SPEED_PER_MINUTE * self.TIME_UNIT_IN_MINUTES
-    
-    @property
-    def CHARGE_BUFFER(self) -> float:
-        """Delay between arrival and charging"""
-        return self.RECHARGE_DELAY_IN_MINUTES / self.TIME_UNIT_IN_MINUTES
-
-@dataclass(frozen=True, order=True)
-class ChargeDepot:
-    """A Depot which contains both charge and time state."""
-    id: int
-    time: int
-    charge: int
-
-
-@dataclass(frozen=True)
-class Job:
-    """Encodes the timing, charge and location information for a job in the MDEVS instance."""
-    id: int
-    start_time: int
-    end_time: int
-    charge: int
-    building_start_id: int
-    building_end_id: int
-    start_location: tuple
-    end_location: tuple
-    id_offset: int = None #Offset to convert to IP / paper indices
-
-    @property
-    def route_str(self):
-        return f"{self.id}"
-    
-    @property
-    def offset_id(self):
-        """Returns the IP / paper index of the job."""
-        return self.id + self.id_offset
-
-
-@dataclass(frozen=True)
-class Building:
-    id: int
-    entrance: tuple
-    type: str
-    capacity: int = None
-    location: tuple = None  # Only applies to depots
-
-    @property
-    def route_str(self):
-        return f"D{self.id}"
-     
-    @property 
-    def offset_id(self):
-        return self.id
-
-
-@dataclass(frozen=True)
-class Fragment:
-    """Encodes a sequence of Jobs which are executed in sequence without visiting a charge station."""
-    id: int
-    jobs: tuple[Job]  # An ordered tuple of jobs
-    start_time: int
-    end_time: int
-    start_depot_id: int
-    end_depot_id: int
-    charge: int
-
-    @property
-    def route_str(self):
-        return " -> ".join([str(j.id) for j in self.jobs])
-
-    @property
-    def verbose_str(self):
-        return f"{self.id}:\n   {self.start_time} -> {self.end_time}, {self.start_depot_id} -> {self.end_depot_id}\n    {[j.id for j in self.jobs]}"
-
-    # def __hash__(self) -> int:
-    #     return hash(self.id)
-    
-
-@dataclass(frozen=True, order=True)
-class ChargeFragment(Fragment):
-    """A copy of a fragment which denotes its starting charge level."""
-    start_charge: int
-
-    @classmethod
-    def from_fragment(cls, start_charge: int, fragment: 'Fragment | ChargeFragment') -> 'ChargeFragment':
-        """Utilty method to create a new ChargeFragment with a given initial charge and fragment information"""
-        return cls(
-            id=fragment.id,
-            jobs=fragment.jobs,
-            start_time=fragment.start_time,
-            end_time=fragment.end_time,
-            start_depot_id=fragment.start_depot_id,
-            end_depot_id=fragment.end_depot_id,
-            charge=fragment.charge,
-            start_charge=start_charge,
-        )
-    
-    @property
-    def end_charge(self) -> int:
-        """Utility method to return the end state charge."""
-        return self.start_charge - self.charge if self.charge <= self.start_charge else ValueError("Negative charge")
-
-    @property
-    def start_charge_depot(self) -> ChargeDepot:
-        """Utility method to return the start depot."""
-        return ChargeDepot(id=self.start_depot_id, time=self.start_time, charge=self.start_charge)
-    
-    @property
-    def end_charge_depot(self) -> ChargeDepot:
-        """Utility method to return the end depot."""
-        return ChargeDepot(id=self.end_depot_id, time=self.end_time, charge=self.end_charge)
-
-
-@dataclass(frozen=True, order=True)
-class TimedFragment:
-    time: int
-    id: int
-    direction: Flow
-
-@dataclass()
-class ChargeDepotStore:
-    start: ChargeDepot=None
-    end: ChargeDepot=None
-
-@dataclass(frozen=True)
-class FrozenChargeDepotStore:
-    """For hashing purposes."""
-    start: ChargeDepot=None
-    end: ChargeDepot=None
-
-@dataclass()
-class Label:
-    """A dataclass which tracks a given node's"""
-    uncompressed_end_depot: ChargeDepot | ChargeDepot
-    end_depot: ChargeDepot | ChargeDepot
-    flow: float | int
-    f_id: int | None  = None# Fragment id
-    f_charge: int | None = None
-    prev_label: 'Label | None' = None
-
-    def __lt__(self, other: 'Label') -> bool:
-        if self.uncompressed_end_depot != other.uncompressed_end_depot:
-            return self.uncompressed_end_depot < other.uncompressed_end_depot
-        if self.end_depot != other.end_depot:
-            return self.end_depot < other.end_depot
-        if self.flow != other.flow:
-            return self.flow < other.flow
-        return False
-
-    def __le__(self, other: 'Label') -> bool:
-        if self.uncompressed_end_depot != other.uncompressed_end_depot:
-            return self.uncompressed_end_depot <= other.uncompressed_end_depot
-        if self.end_depot != other.end_depot:
-            return self.end_depot <= other.end_depot
-        if self.flow != other.flow:
-            return self.flow <= other.flow
-        return True
-
-    def __gt__(self, other: 'Label') -> bool:
-        if self.uncompressed_end_depot != other.uncompressed_end_depot:
-            return self.uncompressed_end_depot > other.uncompressed_end_depot
-        if self.end_depot != other.end_depot:
-            return self.end_depot > other.end_depot
-        if self.flow != other.flow:
-            return self.flow > other.flow
-        return False
-
-    def __ge__(self, other: 'Label') -> bool:
-        if self.uncompressed_end_depot != other.uncompressed_end_depot:
-            return self.uncompressed_end_depot >= other.uncompressed_end_depot
-        if self.end_depot != other.end_depot:
-            return self.end_depot >= other.end_depot
-        if self.flow != other.flow:
-            return self.flow >= other.flow
-        return True
-
-@dataclass()
-class Arc:
-    end_depot: ChargeDepot | ChargeDepot # Target depot
-    start_depot: ChargeDepot | ChargeDepot 
-    flow: float # Number of vehicles
-    f_id: int | None = None # Fragment id
-    f_charge: int | None = None
-
-@dataclass()
-class Route:
-    """Dataclass which encompasses a route and the many forms it can be expressed"""
-    route_list: list[ChargeDepot | Fragment]
-    
-    @property
-    def jobs(self) -> set[Job]:
-        return set(j for f in self.route_list if isinstance(f, Fragment) for j in f.jobs)
-    
-    @classmethod
-    def from_timed_fragments(cls, route_list: list[ChargeDepot | TimedFragment]):
-        """Creates a Route from a list of timed fragments/depots."""
-        raise NotImplementedError()
-
-class ChargeCalculator(ABC):
-    """
-    Abstract class which defines the methods required to calculate the charge and time cost for a given MDEVS instance.
-    dilation_factor is based off the assumption of 100% charge being the maximum charge,
-    and PERCENTAGE_CHARGE_PER_UNIT being half a charge unit.
-    This allows one to experiment with the same overall charge function while dilating it to have different absolute capacities
-    Similary, the discretise parameter allows for using the same charge function in rounded or exact charge situations.
-    """
-    def __init__(self, config: CalculationConfig, discretise=True) -> None:
-        self.config = config
-        self.discretise = discretise
-        # % difference from an undiscretised maximum charge of 100%
-        self.dilation_factor = 2 * self.config.UNDISCRETISED_MAX_CHARGE / 100 * self.config.PERCENTAGE_CHARGE_PER_UNIT 
-
-
-    def get_charge(self, charge: int, recharge_time: int):
-        """
-        Determines the state of charge given a charge level and the amount of time it has to charge.
-        """
-        if recharge_time == 0:
-            return charge
-        
-        if recharge_time < 0:
-            return -1
-        
-        final_charge = self.get_charge_at_time(self.charge_inverse(charge) + recharge_time)
-        return final_charge
-
-    @abstractmethod
-    def get_charge_at_time(self, t: int) -> int:
-        """Returns the charge level from 0% when charging for t units of time."""
-        
-
-    @abstractmethod
-    def charge_inverse(self, charge: int):
-        """
-        Returns the time to charge to a certain level. This should work as an inverse to get_charge_at_time
-        """
-        
 
 class BaseMDEVCalculator(ABC):
     """
     Base class used to centralise data calculations across all model implementations
     """
     
-    def __init__(self, file: str, config=CalculationConfig) -> None:
+    def __init__(
+            self,
+            file: str, 
+            charge_calculator_class: ChargeCalculator,
+            config=CalculationConfig,
+            charge_calculator_kwargs: dict={},
+        ) -> None:
         """
         params: dictionary which specify overrides to the default CalculationParameter.
         """
@@ -322,6 +45,7 @@ class BaseMDEVCalculator(ABC):
         self.jobs_by_id: dict[int, Job] = self.to_dataclass_by_id(self.data["jobs"], Job, id_offset=len(self.depots_by_id))
         self.jobs: list[Job] = list(self.jobs_by_id.values())
         self.config = config
+        self.charge_calculator: ChargeCalculator = charge_calculator_class(config=config, **charge_calculator_kwargs)
         self.statistics: Statistics = Statistics(label=self.data['label'])
 
     def to_dataclass_by_id(
@@ -399,9 +123,21 @@ class BaseMDEVCalculator(ABC):
             )
         return distance
 
+    def get_charge(self, charge: int, t: int) -> int:
+        return self.charge_calculator.get_charge(charge, t)
+
+    def get_charge_at_time(self, t: int) -> int:
+        return self.charge_calculator.get_charge_at_time(t)
+
+    def charge_inverse(self, charge: int):
+        return self.charge_calculator.charge_inverse(charge)
+
     def read_solution(self, instance_type:str=None, sheet_name=None, charging_style='constant-time') -> tuple[list[list[int]], list[str]]:
         """Reads the solution given by the paper into a list of their routes which has waiting arcs and fragments."""
-        data = pd.read_excel(r"mdevs/data/mdevs_solutions.xlsx", sheet_name=sheet_name)
+        try:
+            data = pd.read_excel(r"mdevs/data/mdevs_solutions.xlsx", sheet_name=sheet_name)
+        except:
+            data = pd.read_excel(r"data/mdevs_solutions.xlsx", sheet_name=sheet_name)
         if not sheet_name:
             for sheet in data:
                 if instance_type in sheet:
@@ -409,7 +145,7 @@ class BaseMDEVCalculator(ABC):
                     break
 
         curr_sol_str = data.query(
-            f"ID_instance == {self.data['ID']} and battery_charging == '{charging_style}'"
+            f"ID_instance == {self.data['ID']} and battery == '{charging_style}'"
         )["solution"].values[0]
         solution_routes = []
         string_solution_routes=[]
@@ -448,8 +184,14 @@ class BaseMDEVCalculator(ABC):
     
 class BaseFragmentGenerator(BaseMDEVCalculator):
     TYPE = None
-    def __init__(self, file: str, config: dict={}) -> None:
-        super().__init__(file, config=config)
+    def __init__(
+            self,
+            file: str, 
+            charge_calculator_class: ChargeCalculator,
+            config=CalculationConfig(),
+            charge_calculator_kwargs: dict={},
+        ) -> None:
+        super().__init__(file, charge_calculator_class, config=config, charge_calculator_kwargs=charge_calculator_kwargs)
         self.generate_cost_matrices()
         self.fragment_set: set[Fragment] = set()
         self.fragments_by_id: dict[int, Fragment] = {}
@@ -528,6 +270,64 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                 self.job_charge_matrix[i][j] = self.distance_to_charge(distance)
                 self.job_time_matrix[i][j] = self.distance_to_time(distance)
 
+    def _get_jobs_reachable_from(
+            self,
+            charge: int,
+            job: Job,
+        ) -> set[Fragment]:
+        """
+        Generates a fragment starting at a given job and depot with a given charge at a given time.
+        The three conditions that must be satisfied are:
+        1. The candidate job must be reachable before its start time.
+        2. The candidate job must be able to reach a depot from the new job.
+        3. A detour to a depot will not result in the vehicle reaching the job with a higher charge than it would have directly.
+        """
+        reachable_jobs = []
+        job_end_time = job.end_time
+        for next_job in self.jobs:
+            # 1.
+            arrival_time = job_end_time + self.job_time_matrix[job.id][next_job.id]
+            if next_job.start_time < arrival_time:
+                continue
+            # 2.
+            charge_cost = next_job.charge + self.job_charge_matrix[job.id][next_job.id] + min(
+                self.job_to_depot_charge_matrix[next_job.id][depot.id]
+                for depot in self.depots_by_id.values()
+            )
+            if charge < charge_cost:
+                continue
+            
+            # Find the depot with the minimum time to traverse from job, then back to next job
+            closest_depot = min(
+                (
+                    depot for depot in self.depots
+                    if self.job_to_depot_time_matrix[job.id][depot.id] <= charge
+                ), 
+                key=(
+                    lambda depot: self.job_to_depot_time_matrix[job.id][depot.id]
+                    + self.depot_to_job_time_matrix[depot.id][next_job.id]
+                )
+            )
+            recharge_time = (
+                next_job.start_time 
+                - job_end_time
+                - self.job_to_depot_time_matrix[job.id][closest_depot.id] 
+                - self.depot_to_job_time_matrix[closest_depot.id][next_job.id]
+                - self.config.CHARGE_BUFFER
+            )
+            
+            # 3.
+            detour_charge = (
+                self.get_charge(charge - self.job_to_depot_charge_matrix[job.id][closest_depot.id], recharge_time)
+                - self.depot_to_job_charge_matrix[closest_depot.id][next_job.id]
+            )
+            direct_charge = charge - self.job_charge_matrix[job.id][next_job.id]
+            if detour_charge >= direct_charge:
+                continue
+            reachable_jobs.append(next_job)
+
+        return reachable_jobs
+    
     def generate_fragments(self, file: str=None) -> set[tuple[Job]]:
         """
         Enumerates all possible fragments which satisfy the following requirements:
@@ -686,6 +486,25 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
         for job in self.jobs:
             self._add_coverage_constraint(job)
 
+        self.start_depot_limits = {
+            depot: self.model.addConstr(
+                self.starting_counts[depot.id]
+                <= depot.capacity,
+                name=f"depot_limit_{depot.id}",
+            )
+            for depot in self.depots
+            if depot.capacity != -1
+        }
+        self.end_depot_limits = {
+            depot: self.model.addConstr(
+                self.finishing_counts[depot.id]
+                <= depot.capacity,
+                name=f"depot_limit_{depot.id}",
+            )
+            for depot in self.depots
+            if depot.capacity != -1
+        }
+
         # end same as start
         self.vehicle_conservation = self.model.addConstr(
             quicksum(self.starting_counts.values())
@@ -729,7 +548,9 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                     # Reset the arc
                     prev_node = route.pop(0)
                     continue
-                waiting_arc_flows[(prev_node, curr_node)] += 1
+                waiting_arc_flows[
+                    FrozenChargeDepotStore(start=prev_node, end=curr_node)
+                ] += 1
                 prev_node = curr_node
 
         for arc in self.recharge_arc_var_by_depot_store:
@@ -837,7 +658,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                 routes.append(Route(route_list=route[::-1]))
 
             arc_idx = 0
-            while len(arcs) != 0 and label_flow > EPS:
+            while len(arcs) != 0 and label_flow > FORWARD_LABEL_EPS:
                 arc = arcs[arc_idx]
                 delta = min(arc.flow, label_flow)
                 uncompressed_end_depot = arc.end_depot
@@ -863,12 +684,12 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                 arc.flow -= delta
                 label_flow -= delta
 
-                if arc.flow < EPS:
+                if arc.flow < FORWARD_LABEL_EPS:
                     arcs.pop(arc_idx)
                 else:
                     arc_idx += 1
 
-                if label_flow < EPS:
+                if label_flow < FORWARD_LABEL_EPS:
                     break
         return routes                  
 
@@ -1138,11 +959,6 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
             )
         return fragment_set
 
-    @abstractmethod
-    def _get_jobs_reachable_from(self, charge: int, job: Job) -> list[Job]:
-        """
-        Takes either a job or a depot and returns a set of jobs which can be reached from the input location.
-        """
 
     @abstractmethod
     def generate_timed_network(self) -> None:

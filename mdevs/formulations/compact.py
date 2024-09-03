@@ -317,4 +317,3 @@ class NaiveIP(BaseMDEVCalculator):
         return job_sequences 
 
 
-
