@@ -8,7 +8,7 @@ from mdevs.formulations import *
 import cProfile
 
 NON_LINEAR_BASIC_CONFIG = CalculationConfig(
-    UNDISCRETISED_MAX_CHARGE=70,
+    UNDISCRETISED_MAX_CHARGE=100,
     RECHARGE_DELAY_IN_MINUTES=0.5,        
 )
 
@@ -145,8 +145,8 @@ def constant_time_debug():
 def interpolation_debug():   
     click.echo("Running intepolr debug")
       # Specify the directory you want to search
-    directory = "mdevs/data/instances_regular/"
     directory = "mdevs/data/instances_large/"
+    directory = "mdevs/data/instances_regular/"
 
     # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
     json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True) 
@@ -156,26 +156,43 @@ def interpolation_debug():
     for json_file in json_files:     
         if "fragments" in str(json_file):
             continue
-        if "1000-01" not in str(json_file):
+        # if "50-01" not in str(json_file):
         # if "100" not in str(json_file):
-            continue
+            # continue
         print(f"Solving {json_file}...")
         model = InterpolationIP(
             json_file, 
-            # charge_calculator_class=ConstantChargeFunction,
-            config=CONSTANT_TIME_BASIC_CONFIG,
+            charge_calculator_class=PaperChargeFunction,
+            charge_calculator_kwargs={"discretise": False},
+            config=NON_LINEAR_BASIC_CONFIG,
         )
         routes = model.run()
+        model = NonLinearFragmentGenerator(
+            json_file, 
+            config=NON_LINEAR_BASIC_CONFIG,
+            solve_config=SolveConfig(
+                SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
+                INCLUDE_VISUALISATION=False,
+            )
+        )
+        model.generate_fragments()
+        for route in routes:
+            frags = model.convert_route_to_fragment_route(route)
+            frag_route = []
+            for f in frags:
+                cf = ChargeFragment.from_fragment(start_charge=model.config.MAX_CHARGE, fragment=model.fragments_by_id[f])
+                frag_route.extend(
+                    [
+                        cf.start_charge_depot,
+                        cf,
+                        cf.end_charge_depot,
+                    ]
+                )
+            is_valid, segment = model.validate_route(frag_route)
+            if not is_valid:
+                print(f"Invalid route: {segment}")
+                raise ValueError("Invalid route")
 
-
-        # model = NonLinearFragmentGenerator(
-        #     json_file, 
-        #     config=NON_LINEAR_BASIC_CONFIG,
-        #     solve_config=SolveConfig(
-        #         SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
-        #         INCLUDE_VISUALISATION=False,
-        #     )
-        # )
         # # all_prior_fragments = set(f for s in prior_solution for f in s)
         # # # get fragments associated with a timed depot
         # data = pd.read_excel("mdevs/data/mdevs_solutions.xlsx", sheet_name=None)
@@ -194,8 +211,8 @@ def interpolation_debug():
 def non_linear_debug():   
     click.echo("Running non-linear debug")
       # Specify the directory you want to search
-    directory = "mdevs/data/instances_regular/"
     directory = "mdevs/data/instances_large/"
+    directory = "mdevs/data/instances_regular/"
 
     # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
     json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True) 
@@ -206,7 +223,7 @@ def non_linear_debug():
         if "fragments" in str(json_file):
             continue
         # if "200-01" not in str(json_file):
-        if "1000-03" not in str(json_file):
+        if "50-08" not in str(json_file):
             continue
         print(f"Solving {json_file}...")
         # model = ConstantTimeFragmentGenerator(
@@ -413,7 +430,7 @@ cli.add_command(constant_time_naive_ip_run)
 
 if __name__ == "__main__":
     # constant_time_single("50")
-    non_linear_debug()
+    # non_linear_debug()
     # interpolation_debug()
     cli()
     # run_non_linear_regular_instances("data/results/non_linear_run/s.csv", "1000", None)

@@ -475,7 +475,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         frags = []
         for route in prior_solution:
             cfs = []
-            for f_id in self.convert_route_to_fragments(route):
+            for f_id in self.convert_route_to_fragment_route(route):
                 cfs.append(ChargeFragment.from_fragment(self.config.MAX_CHARGE, self.fragments_by_id[f_id]))
             frags.append(cfs)
         self.set_solution(frags, n_vehicles=len(prior_solution))

@@ -148,13 +148,8 @@ class InterpolationIP(BaseMDEVCalculator):
                     )
                 ) 
 
-                recharge_time = (
-                    end.start_time 
-                    - start.end_time
-                    - self.time_matrix[start.offset_id][min_depot.offset_id]
-                    - self.time_matrix[min_depot.offset_id][end.offset_id]
-                    - self.config.CHARGE_BUFFER
-                )
+                recharge_time = self.get_recharge_time(start, end, min_depot)
+                
                 # TODO: ASSUMES LINEAR CHARGING, will need to be based on current charge level as for non linear
                 break_even_recharge_time = self.charge_inverse(
                     self.charge_matrix[start.offset_id][min_depot.offset_id]
@@ -191,13 +186,43 @@ class InterpolationIP(BaseMDEVCalculator):
         match start, end:
             case Building(), Job():
                 max_charge = self.config.MAX_CHARGE
+            
             case Job(), Job():
                 # Max charge completing the start job
-                max_charge = (
-                    self.config.MAX_CHARGE
-                    - start.charge
-                    - min(self.charge_matrix[depot.offset_id][start.offset_id] for depot in self.depots)
+                # get recharge time between jbos
+                min_depot = self.get_closest_detour_depot(start, end)
+                recharge_time = self.get_recharge_time(start, end, min_depot)
+                
+                start_charge_cost = (
+                    + min(self.charge_matrix[depot.offset_id][start.offset_id] for depot in self.depots)
+                    + start.charge
                 )
+                # Smallest charge such that the recharge time after start allows it to reach full charge before starting end
+                direct_charge = (
+                    self.config.MAX_CHARGE
+                    - start_charge_cost
+                )
+                #TODO: maybe a max here
+                equivalent_detour_charge = (
+                    direct_charge
+                    + (
+                        self.charge_matrix[start.offset_id][min_depot.offset_id]
+                        + self.charge_matrix[min_depot.offset_id][end.offset_id]
+                    )
+                )
+                min_charge = (
+                    self._calculate_minimum_charge_to_reach_max_charge_with_time(
+                        recharge_time, charge=equivalent_detour_charge
+                    )
+                    + start_charge_cost
+                    + self.charge_matrix[start.offset_id][min_depot.offset_id]
+                )
+                direct_has_higher_charge = (
+                    direct_charge - self.charge_matrix[start.offset_id][end.offset_id] 
+                    > min_charge
+                )
+                max_charge = min(direct_charge, min_charge)
+
             case Job(), Building():
                 max_charge = (
                     self.config.MAX_CHARGE
@@ -246,23 +271,10 @@ class InterpolationIP(BaseMDEVCalculator):
         Calculates the best case end charge level from the start job leaving at start_charge.
         """
         min_depot = self.get_closest_detour_depot(start, end, start_charge=start_charge) 
-        recharge_time = (
-            end.start_time 
-            - start.end_time
-            - self.time_matrix[start.offset_id][min_depot.offset_id]
-            - self.time_matrix[min_depot.offset_id][end.offset_id]
-            - self.config.CHARGE_BUFFER
-        )
+        recharge_time = self.get_recharge_time(start, end, min_depot)
  
         charge_at_end_of_detour = (
-            min(
-                (
-                    start_charge
-                    - self.charge_matrix[start.offset_id][min_depot.offset_id]
-                    + self.get_charge(0, recharge_time)
-                ),
-                self.config.MAX_CHARGE
-            )
+            self.get_charge(start_charge - self.charge_matrix[start.offset_id][min_depot.offset_id], recharge_time)
             - self.charge_matrix[min_depot.offset_id][end.offset_id]
         )
 
@@ -274,6 +286,27 @@ class InterpolationIP(BaseMDEVCalculator):
         end_charge = max(charge_at_end_of_detour, charge_without_detour)
         end_charge -= end.charge
         return end_charge
+
+    def _calculate_minimum_charge_to_reach_max_charge_with_time(self, time: int, charge: int | None=None) -> int:
+        if time < 0:
+            return math.inf
+        if charge is None:
+            charge = self.config.MAX_CHARGE
+        
+        max_charge_time = self.charge_inverse(charge)
+        min_charge = self.get_charge_at_time(max_charge_time - time)
+        return min_charge
+
+    def get_recharge_time(self, start: Job, end: Job, min_depot: Building) -> int:
+        recharge_time = (
+            end.start_time 
+            - start.end_time
+            - self.time_matrix[start.offset_id][min_depot.offset_id]
+            - self.time_matrix[min_depot.offset_id][end.offset_id]
+            - self.config.CHARGE_BUFFER
+        )
+        
+        return recharge_time
 
     def get_closest_detour_depot(self, start: Job, end: Job, start_charge: int | None=None) -> Building:
         if start_charge is None:
@@ -391,11 +424,7 @@ class InterpolationIP(BaseMDEVCalculator):
         )
 
     def solve(self):
-        self.model.setParam("TimeLimit", 300)
-        for job in self.jobs:
-            for pair in self.pairs_by_start[job]:
-                self.job_arc_variables[pair].BranchPriority = math.ceil(max(self.jobs, key=lambda j: j.start_time).start_time / job.start_time * 1000)
-        
+        self.model.setParam("TimeLimit", 300)        
         self.model.optimize()
 
         if self.model.Status == GRB.OPTIMAL:
@@ -437,6 +466,7 @@ class InterpolationIP(BaseMDEVCalculator):
                 - self.charge_matrix[seq[0].offset_id][seq[1].offset_id]
                 - seq[1].charge    
             )
+            print(charge)
             assert isinstance(seq[0], Building) and isinstance(seq[-1], Building)
             for start, end in zip(seq[1:], seq[2:-1]): # Exclude last as it is a Building
                 # Check if can do a recharge and reach it in time
@@ -448,6 +478,37 @@ class InterpolationIP(BaseMDEVCalculator):
                 
                 prev_charge = charge
                 assert charge >= 0
+
+    def add_detours_to_route(self, route: list[Location]) -> list[Location]:
+        new_route = [
+            route[0]
+        ]
+        charge = (
+            self.config.MAX_CHARGE 
+            - self.charge_matrix[new_route[0].offset_id][route[1].offset_id]
+            - route[1].charge
+        )
+        for start, end in zip(route[1:], route[2:-1]):
+            new_route.append(start)
+
+            min_depot = self.get_closest_detour_depot(start, end)
+            recharge_time = self.get_recharge_time(start, end, min_depot)
+            charge_at_end_of_detour = (
+                self.get_charge(
+                    charge - self.charge_matrix[start.offset_id][min_depot.offset_id],
+                    recharge_time
+                )
+                - self.charge_matrix[min_depot.offset_id][end.offset_id]
+            )
+            charge_without_detour = (
+                self.charge_matrix[start.offset_id][end.offset_id]
+            )
+            if charge_at_end_of_detour > charge_without_detour:
+                new_route.append(min_depot)
+            charge = self._calculate_end_charge_from_charge_level(start, end, charge)
+        if not isinstance(new_route[-1], Building):
+            new_route.append(route[-1])
+        return new_route
                 
 
     def run(self):
@@ -455,4 +516,5 @@ class InterpolationIP(BaseMDEVCalculator):
         self.solve()
         routes = self.sequence_routes()
         self.validate_routes(routes)
-        return routes
+        detoured = [self.add_detours_to_route(route) for route in routes]
+        return detoured

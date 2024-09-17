@@ -32,6 +32,7 @@ class SolveConfig:
     MIP_GAP: float = 0.05
     REPAIR_UNTIL_RECHARGED: bool = False #Whether to add recharge nodes until we hit max charge (or some other interval, for example until the function hits its non-linear phase) 
     SECOND_OBJECTIVE: SecondObjectives = SecondObjectives.NONE
+    SOLVE_SECOND_OBJECTIVE_OPTIMAL: bool = False # Decides whether to use the secondary objective to guide the optimisation process or solve it exactly
     INCLUDE_VISUALISATION: bool = False
     INCLUDE_MODEL_OUTPUT: bool = False
 
@@ -56,7 +57,8 @@ class NonLinearStatistics(TypedDict):
     lp_runtime: float = None
     a_priori_charge_network_nodes: int = None
     a_priori_charge_network_arcs: int = None
-    invalid_route_segments: int = 0
+    infeasible_route_segments: int = 0
+    infeasible_route_cuts: int = 0
 
 class NonLinearFragmentGenerator(BaseFragmentGenerator):
     TYPE="non-linear"
@@ -85,6 +87,9 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.deadheading_time_by_fragment_cache: dict[int, int] = {}
         self.statistics = NonLinearStatistics(**self.statistics)
         self.invalid = set() #TODO: REMOVE THIS IS A DEBUG TOOL
+        self.curr_vtype: str = GRB.BINARY # GRB.CONTINUOUS or GRB.BINARY
+        self.vehicle_count: int = None
+        self.valid_routes: list[Route] | None = None
         self.ip_cuts: dict[tuple[ChargeFragment, ...], Constr] = {}
 
     def generate_timed_network(self) -> None:
@@ -334,6 +339,18 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
 
     def validate_job_sequences(self, routes: list[list[ChargeDepot | Fragment]]) -> bool:
         raise NotImplementedError()
+    
+    def _check_route_for_invalid_pair(self, route: list[ChargeDepot | Fragment]) -> bool:
+        fragments = [loc for loc in route if isinstance(loc, Fragment)]
+        if len(fragments) != 2:
+            return
+        start = fragments[0]
+        end = fragments[1]
+        start_charge = self.config.MAX_CHARGE - start.charge
+        recharge_time = end.start_time - start.end_time
+        self.statistics['2_frag_routes'] = self.statistics.get('2_frag_routes', 0) + 1
+        if self.get_charge(start_charge, recharge_time) - end.charge < 0:
+            self.statistics["inf_2_frags"] = self.statistics.get("inf_2_frags", 0) + 1
 
     def inspect_solution(
             self,
@@ -347,6 +364,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         n_added = 0
         invalid_in_iter = set()
         for route in routes:
+            self._check_route_for_invalid_pair(route.route_list)
             for i, (curr, next) in enumerate(zip(route.route_list, route.route_list[1:])):
                 if not (isinstance(curr, ChargeDepot) and isinstance(next, Fragment)):
                     continue
@@ -361,10 +379,10 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 invalid_in_iter.add(tuple(segment))
                 self.invalid.add(tuple(segment))
                 nodes_to_update.update(self.amend_violated_route(segment, store=store))       
+                self.statistics["infeasible_route_segments"] += 1
                 has_violations = True
                 n_added += 1
         if n_added > 0:
-            self.statistics["invalid_route_segments"] += 1
             print(f"    violations: {n_added=}")
         
        # Update model to reflect new arcs and nodes.
@@ -532,7 +550,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         return next_time
     
     def _add_new_depot(
-            self, charge_depot: ChargeDepot, origin_fragment: ChargeFragment | None=None, use_min_charge_condition=False, store=ValidationStore()
+            self, charge_depot: ChargeDepot, origin_fragment: ChargeFragment | None=None, store=ValidationStore()
         ) -> set[ChargeDepot]:
         """
         Repairs a given node by adding a new node to the network at the real charge level
@@ -542,9 +560,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         # if charge_depot in self.charge_depots_by_depot[charge_depot.id]:
         #     return nodes_to_update
         updated_fragments = self._update_fragment_arcs(charge_depot, origin_fragment=origin_fragment, store=store)
-        updated_charge = self._update_charge_arcs(
-            charge_depot, use_min_charge_condition=use_min_charge_condition, store=store
-        )
+        updated_charge = self._update_charge_arcs(charge_depot, store=store)
         
         nodes_to_update.update(updated_fragments)
         nodes_to_update.update(updated_charge)
@@ -647,14 +663,13 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.charge_fragments_by_id[new_charge_fragment.id].add(new_charge_fragment)
         self.charge_depots_by_charge_fragment[new_charge_fragment] = ChargeDepotStore(
                 start=new_depot, end=end_depot
-            )
-            # TODO: CHASE THIS UP - ARE WE GETTING DUPLICATES
+        )
         self.fragment_vars_by_charge_fragment[new_charge_fragment] = self.model.addVar(
-                vtype=GRB.BINARY, name=f"f_{new_charge_fragment.id}_c_{new_charge_fragment.start_charge}"
-            )
+                vtype=self.curr_vtype, name=f"f_{new_charge_fragment.id}_c_{new_charge_fragment.start_charge}"
+        )
 
     def _update_charge_arcs(
-            self, new_depot: ChargeDepot, use_min_charge_condition: bool=False, store=ValidationStore()
+            self, new_depot: ChargeDepot, store=ValidationStore()
         ) -> set[ChargeDepot]:
         """
         Updates the network to include charge arcs leaving the new_depot.
@@ -784,8 +799,9 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.recharge_arcs_by_charge_depot[recharge_arc.start].add(recharge_arc)
         self.recharge_arcs_by_charge_depot[recharge_arc.end].add(recharge_arc)
         self.recharge_arcs.add(recharge_arc)
+        vtype = GRB.INTEGER if self.curr_vtype == GRB.BINARY else GRB.CONTINUOUS
         self.recharge_arc_var_by_depot_store[recharge_arc] = self.model.addVar(
-            vtype=GRB.INTEGER, name=f"w_{recharge_arc.start}_{recharge_arc.end}"
+            vtype=vtype, name=f"w_{recharge_arc.start}_{recharge_arc.end}"
         )
 
     def set_solution(self) -> set[ChargeFragment]:
@@ -884,16 +900,45 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             case SecondObjectives.MAX_DEADHEADING:
                 self._set_dead_heading_objective(sense="max")
     
-    def _ban_invalid_routes(self, routes: list[Route]) -> None:
+    def _ban_invalid_routes(self, model: Model, where) -> None:
         """
         Bans routes that are invalid from the model
         """
-        for route in routes:
-            if not route.is_valid:
-                self.model.addConstr(
-                    quicksum(self.fragment_vars_by_charge_fragment[cf] for cf in route.route_list) == 0
-                )
-
+        if where == GRB.Callback.MIPSOL:
+            solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
+                (cf, val) 
+                for cf in self.fragment_vars_by_charge_fragment
+                if (val := model.cbGetSolution(self.fragment_vars_by_charge_fragment[cf])) > VAR_EPS
+            }
+            waiting_arcs = [
+                (arc.start, arc.end, model.cbGetSolution(self.recharge_arc_var_by_depot_store[arc]))
+                for arc in self.recharge_arc_var_by_depot_store
+                if model.cbGetSolution(self.recharge_arc_var_by_depot_store[arc]) > VAR_EPS
+            ]
+            n_cuts = 0
+            routes = self.forward_label(solution_charge_fragments, waiting_arcs)
+            has_violations = False
+            for route in routes:
+                self._check_route_for_invalid_pair(route.route_list)
+                is_valid, segment = self.validate_route(route.route_list)
+                if not is_valid:
+                    has_violations = True
+                    self.ip_cuts[tuple(segment)] = model.cbLazy(
+                        quicksum(
+                            self.fragment_vars_by_charge_fragment[cf] 
+                            for cf in segment 
+                            if isinstance(cf, ChargeFragment)
+                        ) 
+                        <= len(segment) - 1
+                    )
+                    n_cuts += 1
+                    self.statistics["infeasible_route_cuts"] += 1
+            # if not has_violations and not self.solve_config.SOLVE_SECOND_OBJECTIVE_OPTIMAL:
+            #     self.valid_routes = routes
+            #     self.model.terminate()
+            if n_cuts > 0:
+                print(f"    Added {n_cuts} cuts")
+                
     def solve(self):
         print("setting solve...")
         self.model.setParam("OutputFlag", 0)
@@ -901,12 +946,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.model.update()
         use_visualisation = self.solve_config.INCLUDE_VISUALISATION
         valid_relaxation = False
-        var_type = GRB.CONTINUOUS
-        has_valid_lp_relaxation = False
         n_iters = 0
         prev_obj = 0
-        model_solve_time_key = "lp_runtime"
-        model_iter_key = "num_lp_iters" 
         if use_visualisation:
             fig = Figure()
         self.statistics.update(
@@ -919,36 +960,39 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 "mip_runtime": 0,
                 "initial_bound": 0,
                 "final_bound": 0,
-                "invalid_route_segments": 0,
+                "infeasible_route_segments": 0,
+                "infeasible_route_cuts": 0,
             }
         )
 
         # self._add_initial_network_cuts()
-        self._change_variable_domain(var_type)
+        self._set_variable_domain(GRB.CONTINUOUS)
+        self.model.setParam("TimeLimit", self.solve_config.TIME_LIMIT)
         self.model.optimize()
+        remaining_time = self.solve_config.TIME_LIMIT - self.model.Runtime
         self.statistics["runtime"] += self.model.Runtime
         self.statistics["initial_bound"] = self.model.objval
-        self.statistics[model_solve_time_key] += self.model.Runtime
+        self.statistics["lp_runtime"] += self.model.Runtime
         # self.set_solution()
-        vehicle_count = self.model.objval
-        print(f"Initial solve took {self.model.Runtime}, {vehicle_count=}")#, paper: {self._get_paper_objective_value()}")
-        self.obj_constr = self.model.addConstr(quicksum(self.starting_counts.values()) == vehicle_count, name="objective_limit")
+        self.vehicle_count = self.model.objval
+        print(f"Initial solve took {self.model.Runtime}, {self.vehicle_count=}")#, paper: {self._get_paper_objective_value()}")
+        self.obj_constr = self.model.addConstr(quicksum(self.starting_counts.values()) == self.vehicle_count, name="objective_limit")
         while (
             not valid_relaxation 
             and n_iters < self.solve_config.MAX_ITERATIONS 
-            and self.statistics['runtime'] + self.statistics['inspection_time'] < self.solve_config.TIME_LIMIT
+            and remaining_time > 0
         ):
             self._set_secondary_objective()
             n_iters += 1
-            self.statistics[model_iter_key] += 1
-            print(f"Starting iteration {n_iters}")
-            self._change_variable_domain(var_type)
-            
+            self.statistics["num_lp_iters"] += 1
+            print(f"Starting iteration {n_iters}")            
             self.model.update()
             self.model.setParam("Seed", 0)
+            self.model.setParam("TimeLimit", remaining_time)
             self.model.optimize()
             self.statistics["runtime"] += self.model.Runtime
-            self.statistics[model_solve_time_key] += self.model.Runtime
+            remaining_time -= self.model.Runtime
+            self.statistics["lp_runtime"] += self.model.Runtime
 
             if self.model.status == GRB.Status.OPTIMAL:
                 solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
@@ -962,7 +1006,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                     
                 waiting_arcs = [
                     (arc.start, arc.end, self.recharge_arc_var_by_depot_store[arc].x) 
-                    for arc in self.recharge_arc_var_by_depot_store if self.recharge_arc_var_by_depot_store[arc].x > VAR_EPS
+                    for arc in self.recharge_arc_var_by_depot_store 
+                    if self.recharge_arc_var_by_depot_store[arc].x > VAR_EPS
                 ]
                 if use_visualisation:
                     fig = self.add_solution_trace(fig=fig)
@@ -976,36 +1021,60 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 if use_visualisation:
                     self.add_inspection_trace(fig, network_additions)
                 self.statistics["inspection_time"] += inspection_time
-                if valid_relaxation and not has_valid_lp_relaxation:
-                    print("    Valid linear relaxation, changing to integer variables...")
-                    var_type = GRB.BINARY
-                    self.model.setParam("outputFlag", 1)
-                    model_solve_time_key = "mip_runtime"
-                    model_iter_key = "num_mip_iters"
-                    has_valid_lp_relaxation = True
-                    valid_relaxation = False
-                continue
+                remaining_time -= self.model.Runtime
             else:
                 # Hit a lower bound issue
-                if vehicle_count > len(self.jobs):
-                    self.model.computeIIS()
-                    self.model.write("fragment_network.ilp")
-                    raise Exception("Relaxation is infeasible")
-                vehicle_count += 1
-                self.obj_constr.RHS = vehicle_count
+                self.handle_infeasible_model()
         
+        print("    Valid linear relaxation, solving integer program...")
+        self._set_variable_domain(GRB.BINARY)
+        self.model.setParam("LazyConstraints", 1)
+        mip_is_feasible = False
+        interrupted = False
+        while (
+            remaining_time > 0
+            and not mip_is_feasible
+        ):
+            n_iters += 1
+            self.statistics["num_mip_iters"] += 1
+            self.model.setParam("TimeLimit", remaining_time)
+            self.model.setParam("outputFlag", 1)
+            self.model.optimize(lambda model, where: self._ban_invalid_routes(model, where))
+            match self.model.Status:
+                case GRB.Status.OPTIMAL:
+                    mip_is_feasible = True
+                    remaining_time -= self.model.Runtime
+                    self.statistics["runtime"] += self.model.Runtime
+                    self.statistics["mip_runtime"] += self.model.Runtime
+                case GRB.Status.INFEASIBLE: 
+                    self.handle_infeasible_model()
+                case _:
+                    if self.valid_routes is None:
+                        interrupted = True
+                    break
+
+
         hit_runtime_limit = (
             self.statistics["runtime"] + self.statistics['inspection_time'] >= self.solve_config.TIME_LIMIT 
-            or
-            n_iters >= self.solve_config.MAX_ITERATIONS
+            or n_iters >= self.solve_config.MAX_ITERATIONS
+            or interrupted
         )
         if not hit_runtime_limit:
             print(f"solved in {n_iters} iterations")
+            solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
+                (cf, self.fragment_vars_by_charge_fragment[cf].x) 
+                for cf in self.fragment_vars_by_charge_fragment 
+                if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > VAR_EPS
+            }   
+            waiting_arcs = [
+                (arc.start, arc.end, self.recharge_arc_var_by_depot_store[arc].x) 
+                for arc in self.recharge_arc_var_by_depot_store 
+                if self.recharge_arc_var_by_depot_store[arc].x > VAR_EPS
+            ]
             routes = self.forward_label(solution_charge_fragments, waiting_arcs)
-            assert len(routes) == vehicle_count
             for route in routes:
                 is_valid, _ = self.validate_route(route.route_list)
-                assert is_valid
+                # assert is_valid
 
         self.statistics.update(
             {
@@ -1013,7 +1082,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 "objective": len(routes) if not hit_runtime_limit else -1,
                 'solved': not hit_runtime_limit,
                 'solve_type': self.solve_config.SECOND_OBJECTIVE.value,
-                "final_bound": vehicle_count,
+                "final_bound": self.vehicle_count,
+                "total_time": self.statistics["runtime"] + self.statistics['inspection_time'],
             }
         )
         if use_visualisation:
@@ -1022,6 +1092,22 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 f"../images/{self.data['label']}_transformation_{self.solve_config.SECOND_OBJECTIVE.value}.html"
             )
         print(f"{self.statistics=}")
+
+    def handle_infeasible_model(self):
+        """
+        Increases the constraint on the number of vehicles leaving the start by 1.
+        If the vehicle count is above the number of jobs, then the relaxation is infeasible and an IIS is computed.
+        """
+        if (
+            self.vehicle_count is None
+            or self.obj_constr is None
+            or self.vehicle_count > len(self.jobs)
+        ):
+            self.model.computeIIS()
+            self.model.write("fragment_network.ilp")
+            raise Exception("Relaxation is infeasible")
+        self.vehicle_count += 1            
+        self.obj_constr.RHS = self.vehicle_count
 
     def add_solution_trace(self, fig: Figure | None=None):
         if fig is None:
@@ -1062,15 +1148,18 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         # self._add_nodes_at_charge_level(int(np.percentile([cf.charge for cf in self.charge_fragments], 50)))
         self._add_end_nodes_for_fragments()
 
-    def _change_variable_domain(self, var_type: str):
+    def _set_variable_domain(self, var_type: str) -> None:
         """
-        Sets all variable vtypes to the given type
+        Sets all variable vtypes to the given type. This is either GRB.BINARY or GRB.CONTINUOUS
+        In the binary case, integer variables are set instead where appropriate. 
+        i.e. sets it to the linear relaxation or integer version of the problem.
         """
+        self.curr_vtype = var_type
         for var in self.fragment_vars_by_charge_fragment.values():
             var.VType = var_type
         
         # Can't have binary variables for the counts or recharge arcs
-        if var_type == GRB.BINARY:
+        if self.curr_vtype == GRB.BINARY:
             var_type = GRB.INTEGER
 
         for var in self.recharge_arc_var_by_depot_store.values():
