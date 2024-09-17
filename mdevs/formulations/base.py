@@ -701,7 +701,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
         
         fragment_routes = []
         for current_route in solution_routes:
-            route_fragment_ids = self.convert_route_to_fragments(current_route)
+            route_fragment_ids = self.convert_route_to_fragment_route(current_route)
             fragment_routes.append(route_fragment_ids)
         return fragment_routes, string_solution_routes
 
@@ -738,7 +738,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                 )
             )
 
-    def convert_route_to_fragments(self, route: list[Job | Building]) -> list[int]:
+    def convert_route_to_fragment_route(self, route: list[Job | Building]) -> list[int]:
         """Converts a route from the paper's data format into its fragments"""
         fragment_ids = []
         current_fragment = {
@@ -749,7 +749,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
             "end_time": None,
         }
 
-        fragments_in_order = []
+        fragment_route = []
         for i, location in enumerate(route):
             match location:
                 case Building():
@@ -761,7 +761,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                         current_fragment["end_depot_id"] = location.id
                         frag_id = self.get_fragment_id(current_fragment)
                         if frag_id is not None:
-                            fragments_in_order.append(frag_id)
+                            fragment_route.append(self.fragments_by_id[frag_id])
                             fragment_ids.append(frag_id)
                         else:
                             if len(current_fragment["jobs"]) == 0:
@@ -799,7 +799,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                         }
                 case Job():
                     current_fragment["jobs"].append(location)
-            
+
         return fragment_ids
 
     def validate_timed_network(self):
