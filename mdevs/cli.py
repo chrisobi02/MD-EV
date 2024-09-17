@@ -223,7 +223,7 @@ def non_linear_debug():
         if "fragments" in str(json_file):
             continue
         # if "200-01" not in str(json_file):
-        if "50-08" not in str(json_file):
+        if "200-0" not in str(json_file):
             continue
         print(f"Solving {json_file}...")
         # model = ConstantTimeFragmentGenerator(
@@ -430,7 +430,7 @@ cli.add_command(constant_time_naive_ip_run)
 
 if __name__ == "__main__":
     # constant_time_single("50")
-    # non_linear_debug()
+    non_linear_debug()
     # interpolation_debug()
     cli()
     # run_non_linear_regular_instances("data/results/non_linear_run/s.csv", "1000", None)

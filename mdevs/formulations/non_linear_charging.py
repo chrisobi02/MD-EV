@@ -899,53 +899,17 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 self._set_dead_heading_objective(sense="min")
             case SecondObjectives.MAX_DEADHEADING:
                 self._set_dead_heading_objective(sense="max")
-    
-    def _ban_invalid_routes(self, model: Model, where) -> None:
-        """
-        Bans routes that are invalid from the model
-        """
-        if where == GRB.Callback.MIPSOL:
-            solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
-                (cf, val) 
-                for cf in self.fragment_vars_by_charge_fragment
-                if (val := model.cbGetSolution(self.fragment_vars_by_charge_fragment[cf])) > VAR_EPS
-            }
-            waiting_arcs = [
-                (arc.start, arc.end, model.cbGetSolution(self.recharge_arc_var_by_depot_store[arc]))
-                for arc in self.recharge_arc_var_by_depot_store
-                if model.cbGetSolution(self.recharge_arc_var_by_depot_store[arc]) > VAR_EPS
-            ]
-            n_cuts = 0
-            routes = self.forward_label(solution_charge_fragments, waiting_arcs)
-            has_violations = False
-            for route in routes:
-                self._check_route_for_invalid_pair(route.route_list)
-                is_valid, segment = self.validate_route(route.route_list)
-                if not is_valid:
-                    has_violations = True
-                    self.ip_cuts[tuple(segment)] = model.cbLazy(
-                        quicksum(
-                            self.fragment_vars_by_charge_fragment[cf] 
-                            for cf in segment 
-                            if isinstance(cf, ChargeFragment)
-                        ) 
-                        <= len(segment) - 1
-                    )
-                    n_cuts += 1
-                    self.statistics["infeasible_route_cuts"] += 1
-            # if not has_violations and not self.solve_config.SOLVE_SECOND_OBJECTIVE_OPTIMAL:
-            #     self.valid_routes = routes
-            #     self.model.terminate()
-            if n_cuts > 0:
-                print(f"    Added {n_cuts} cuts")
-                
+
     def solve(self):
         print("setting solve...")
         self.model.setParam("OutputFlag", 0)
         self.model.setParam("Seed", 0)
         self.model.update()
         use_visualisation = self.solve_config.INCLUDE_VISUALISATION
-        valid_relaxation = False
+        valid_solution = False
+        has_valid_lp_relaxation = False
+        model_solve_time_key = "lp_runtime"
+        model_iter_key = "num_lp_iters"
         n_iters = 0
         prev_obj = 0
         if use_visualisation:
@@ -961,7 +925,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 "initial_bound": 0,
                 "final_bound": 0,
                 "infeasible_route_segments": 0,
-                "infeasible_route_cuts": 0,
             }
         )
 
@@ -972,27 +935,27 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         remaining_time = self.solve_config.TIME_LIMIT - self.model.Runtime
         self.statistics["runtime"] += self.model.Runtime
         self.statistics["initial_bound"] = self.model.objval
-        self.statistics["lp_runtime"] += self.model.Runtime
+        self.statistics[model_solve_time_key] += self.model.Runtime
         # self.set_solution()
         self.vehicle_count = self.model.objval
         print(f"Initial solve took {self.model.Runtime}, {self.vehicle_count=}")#, paper: {self._get_paper_objective_value()}")
         self.obj_constr = self.model.addConstr(quicksum(self.starting_counts.values()) == self.vehicle_count, name="objective_limit")
         while (
-            not valid_relaxation 
+            not valid_solution 
             and n_iters < self.solve_config.MAX_ITERATIONS 
-            and remaining_time > 0
+            and 0 < remaining_time
         ):
             self._set_secondary_objective()
             n_iters += 1
-            self.statistics["num_lp_iters"] += 1
+            self.statistics[model_iter_key] += 1
             print(f"Starting iteration {n_iters}")            
             self.model.update()
             self.model.setParam("Seed", 0)
             self.model.setParam("TimeLimit", remaining_time)
             self.model.optimize()
             self.statistics["runtime"] += self.model.Runtime
+            self.statistics[model_solve_time_key] += self.model.Runtime
             remaining_time -= self.model.Runtime
-            self.statistics["lp_runtime"] += self.model.Runtime
 
             if self.model.status == GRB.Status.OPTIMAL:
                 solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
@@ -1014,7 +977,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 network_additions = ValidationStore()
                 print("    Inspecting solution...")
                 time0 = timer.time()
-                valid_relaxation = self.inspect_solution(
+                valid_solution = self.inspect_solution(
                     solution_charge_fragments, waiting_arcs, store=network_additions
                 )
                 inspection_time = timer.time() - time0
@@ -1022,42 +985,21 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                     self.add_inspection_trace(fig, network_additions)
                 self.statistics["inspection_time"] += inspection_time
                 remaining_time -= self.model.Runtime
+                if valid_solution and not has_valid_lp_relaxation:
+                    print("    Valid linear relaxation, changing to integer variables...")
+                    self._set_variable_domain(GRB.BINARY)
+                    self.model.setParam("outputFlag", 1)
+                    model_solve_time_key = "mip_runtime"
+                    model_iter_key = "num_mip_iters"
+                    has_valid_lp_relaxation = True
+                    valid_solution = False
             else:
                 # Hit a lower bound issue
                 self.handle_infeasible_model()
-        
-        print("    Valid linear relaxation, solving integer program...")
-        self._set_variable_domain(GRB.BINARY)
-        self.model.setParam("LazyConstraints", 1)
-        mip_is_feasible = False
-        interrupted = False
-        while (
-            remaining_time > 0
-            and not mip_is_feasible
-        ):
-            n_iters += 1
-            self.statistics["num_mip_iters"] += 1
-            self.model.setParam("TimeLimit", remaining_time)
-            self.model.setParam("outputFlag", 1)
-            self.model.optimize(lambda model, where: self._ban_invalid_routes(model, where))
-            match self.model.Status:
-                case GRB.Status.OPTIMAL:
-                    mip_is_feasible = True
-                    remaining_time -= self.model.Runtime
-                    self.statistics["runtime"] += self.model.Runtime
-                    self.statistics["mip_runtime"] += self.model.Runtime
-                case GRB.Status.INFEASIBLE: 
-                    self.handle_infeasible_model()
-                case _:
-                    if self.valid_routes is None:
-                        interrupted = True
-                    break
-
 
         hit_runtime_limit = (
-            self.statistics["runtime"] + self.statistics['inspection_time'] >= self.solve_config.TIME_LIMIT 
+            remaining_time <= 0
             or n_iters >= self.solve_config.MAX_ITERATIONS
-            or interrupted
         )
         if not hit_runtime_limit:
             print(f"solved in {n_iters} iterations")
@@ -1074,7 +1016,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             routes = self.forward_label(solution_charge_fragments, waiting_arcs)
             for route in routes:
                 is_valid, _ = self.validate_route(route.route_list)
-                # assert is_valid
+                assert is_valid
 
         self.statistics.update(
             {
