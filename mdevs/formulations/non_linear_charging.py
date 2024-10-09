@@ -15,11 +15,11 @@ from mdevs.formulations.base import *
 from mdevs.formulations.charge_functions import PaperChargeFunction
 from gurobipy import Constr
 
-class SecondObjectives(Enum):
+class Objective(Enum):
     """
     Enum for the different second objectives that can be used in the DDD process
     """
-    NONE = "min_vehicles"
+    MIN_VEHICLES = "min_vehicles"
     MIN_CHARGE = "min_charge"
     MIN_DEADHEADING = "min_deadheading"
     MAX_DEADHEADING = "max_deadheading"
@@ -27,11 +27,10 @@ class SecondObjectives(Enum):
 @dataclass
 class SolveConfig:
     """Config for different aspects of the DDD process"""
-    MAX_ITERATIONS: int = 1000
+    MAX_ITERATIONS: int = 100000
     TIME_LIMIT: int = 900
     MIP_GAP: float = 0.05
-    REPAIR_UNTIL_RECHARGED: bool = False #Whether to add recharge nodes until we hit max charge (or some other interval, for example until the function hits its non-linear phase) 
-    SECOND_OBJECTIVE: SecondObjectives = SecondObjectives.NONE
+    SECOND_OBJECTIVE: Objective = Objective.MIN_VEHICLES
     SOLVE_SECOND_OBJECTIVE_OPTIMAL: bool = False # Decides whether to use the secondary objective to guide the optimisation process or solve it exactly
     INCLUDE_VISUALISATION: bool = False
     INCLUDE_MODEL_OUTPUT: bool = False
@@ -48,17 +47,6 @@ class ValidationStore:
         self.depots_to_update.update(other.depots_to_update)
         self.new_recharge_arcs.update(other.new_recharge_arcs)
         self.jobs_to_update.update(other.jobs_to_update)
-
-class NonLinearStatistics(TypedDict):
-    inspection_time: float = None
-    num_lp_iters: int = None
-    num_lp_iters: int = None
-    mip_runtime: float = None
-    lp_runtime: float = None
-    a_priori_charge_network_nodes: int = None
-    a_priori_charge_network_arcs: int = None
-    infeasible_route_segments: int = 0
-    infeasible_route_cuts: int = 0
 
 class NonLinearFragmentGenerator(BaseFragmentGenerator):
     TYPE="non-linear"
@@ -86,11 +74,10 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.next_time_after_depot_time_cache: dict[tuple[int, int], int] = {}
         self.deadheading_time_by_fragment_cache: dict[int, int] = {}
         self.statistics = NonLinearStatistics(**self.statistics)
-        self.invalid = set() #TODO: REMOVE THIS IS A DEBUG TOOL
         self.curr_vtype: str = GRB.BINARY # GRB.CONTINUOUS or GRB.BINARY
         self.vehicle_count: int = None
         self.valid_routes: list[Route] | None = None
-        self.ip_cuts: dict[tuple[ChargeFragment, ...], Constr] = {}
+        self.mip_solution: list[Route] | None = None
 
     def generate_timed_network(self) -> None:
         """
@@ -362,9 +349,8 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         has_violations = False
         nodes_to_update = set()
         n_added = 0
-        invalid_in_iter = set()
         for route in routes:
-            self._check_route_for_invalid_pair(route.route_list)
+            # self._check_route_for_invalid_pair(route.route_list)
             for i, (curr, next) in enumerate(zip(route.route_list, route.route_list[1:])):
                 if not (isinstance(curr, ChargeDepot) and isinstance(next, Fragment)):
                     continue
@@ -372,13 +358,10 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 is_valid, segment = self.validate_route(route_segment, start_charge=curr.charge)
                 if is_valid:
                     break
-                if tuple(segment) in self.invalid and tuple(segment) not in invalid_in_iter:
-                    pass
-                if segment == [ChargeDepot(id=1, time=61, charge=140), ChargeFragment(id=168, jobs=(Job(id=10, start_time=62, end_time=103, charge=51, building_start_id=1, building_end_id=2, start_location=(113, 134), end_location=(124, 60), id_offset=2), Job(id=18, start_time=116, end_time=148, charge=34, building_start_id=0, building_end_id=2, start_location=(62, 171), end_location=(25, 15), id_offset=2)), start_time=61, end_time=160.0, start_depot_id=1, end_depot_id=0, charge=100, start_charge=140), ChargeDepot(id=0, time=168, charge=51), ChargeFragment(id=143, jobs=(Job(id=27, start_time=169, end_time=197, charge=35, building_start_id=0, building_end_id=2, start_location=(62, 171), end_location=(71, 77), id_offset=2),), start_time=168, end_time=212.0, start_depot_id=0, end_depot_id=1, charge=44, start_charge=51), ChargeDepot(id=1, time=234, charge=47), ChargeDepot(id=1, time=237, charge=140), ChargeDepot(id=1, time=239.0, charge=140), ChargeDepot(id=1, time=241.0, charge=140), ChargeDepot(id=1, time=247, charge=140), ChargeFragment(id=29, jobs=(Job(id=44, start_time=249, end_time=299, charge=51, building_start_id=1, building_end_id=2, start_location=(131, 2), end_location=(176, 191), id_offset=2),), start_time=247, end_time=316.0, start_depot_id=1, end_depot_id=1, charge=61, start_charge=140)]:
-                    pass
-                invalid_in_iter.add(tuple(segment))
-                self.invalid.add(tuple(segment))
-                nodes_to_update.update(self.amend_violated_route(segment, store=store))       
+                try:
+                    nodes_to_update.update(self.amend_violated_route(segment, store=store))       
+                except:
+                    nodes_to_update.update(self.amend_violated_route(segment, store=store))       
                 self.statistics["infeasible_route_segments"] += 1
                 has_violations = True
                 n_added += 1
@@ -617,8 +600,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 invalid_inbound_arcs.append(charge_fragment)
 
         for charge_fragment in invalid_inbound_arcs:
-            if charge_fragment.id == 143 and charge_fragment.start_charge == 51:
-                pass
             self.charge_fragments_by_charge_depot[prev_depot].remove(charge_fragment)
             self.charge_fragments_by_charge_depot[new_depot].add(charge_fragment)
             self.charge_depots_by_charge_fragment[charge_fragment].end = new_depot
@@ -890,15 +871,52 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             ),
             GRB.MINIMIZE if sense == "min" else GRB.MAXIMIZE
         )
+    
+    def _set_fleet_size_objective(self) -> None:
+        self.model.setObjective(quicksum(self.starting_counts.values()), GRB.MINIMIZE)
 
-    def _set_secondary_objective(self) -> None:
-        match self.solve_config.SECOND_OBJECTIVE:
-            case SecondObjectives.MIN_CHARGE:
+    def _set_secondary_objective(self, obj: Objective=None) -> None:
+        if obj is None:
+            obj = self.solve_config.SECOND_OBJECTIVE
+        match obj:
+            case Objective.MIN_CHARGE:
                 self._set_minimum_charge_objective()
-            case SecondObjectives.MIN_DEADHEADING:
+            case Objective.MIN_DEADHEADING:
                 self._set_dead_heading_objective(sense="min")
-            case SecondObjectives.MAX_DEADHEADING:
+            case Objective.MAX_DEADHEADING:
                 self._set_dead_heading_objective(sense="max")
+            case Objective.MIN_VEHICLES:
+                self._set_fleet_size_objective()
+
+    def _early_exit(self, model, where):
+        """
+        At MIP nodes, check the solution and if it is feasible, exit early.
+        """
+        if where == GRB.Callback.MIPSOL:
+            charge_fragment_sol = self.model.cbGetSolution(self.fragment_vars_by_charge_fragment)
+            waiting_sol = self.model.cbGetSolution(self.recharge_arc_var_by_depot_store)
+            solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
+                (cf, charge_fragment_sol[cf]) 
+                for cf in charge_fragment_sol
+                if charge_fragment_sol[cf] > VAR_EPS
+            }
+            waiting_arcs = [
+                (arc.start, arc.end, waiting_sol[arc]) 
+                for arc in waiting_sol 
+                if waiting_sol[arc] > VAR_EPS
+            ]
+            routes = self.forward_label(solution_charge_fragments, waiting_arcs)
+            is_valid = True
+            for route in routes:
+                is_valid, segment = self.validate_route(route.route_list)
+                if not is_valid:
+                    break
+
+            if is_valid:
+                print("\n\nSolution found in branch and bound!\n\n")
+                self.mip_solution = routes
+                model.terminate()
+                return
 
     def solve(self):
         print("setting solve...")
@@ -940,19 +958,20 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.vehicle_count = self.model.objval
         print(f"Initial solve took {self.model.Runtime}, {self.vehicle_count=}")#, paper: {self._get_paper_objective_value()}")
         self.obj_constr = self.model.addConstr(quicksum(self.starting_counts.values()) == self.vehicle_count, name="objective_limit")
+        self._set_secondary_objective()
+        callback = None
         while (
             not valid_solution 
             and n_iters < self.solve_config.MAX_ITERATIONS 
             and 0 < remaining_time
         ):
-            self._set_secondary_objective()
             n_iters += 1
             self.statistics[model_iter_key] += 1
             print(f"Starting iteration {n_iters}")            
             self.model.update()
             self.model.setParam("Seed", 0)
             self.model.setParam("TimeLimit", remaining_time)
-            self.model.optimize()
+            self.model.optimize(callback)
             self.statistics["runtime"] += self.model.Runtime
             self.statistics[model_solve_time_key] += self.model.Runtime
             remaining_time -= self.model.Runtime
@@ -986,13 +1005,27 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 self.statistics["inspection_time"] += inspection_time
                 remaining_time -= self.model.Runtime
                 if valid_solution and not has_valid_lp_relaxation:
+                    valid_solution = False
                     print("    Valid linear relaxation, changing to integer variables...")
+                    # Check all variables are 1 or 0 just for fun???
+                    if (
+                        all(
+                            abs(var.x - 1) < VAR_EPS or abs(var.x) < VAR_EPS
+                            for var in self.model.getVars()
+                        )
+                    ):
+                        valid_solution = True
+                        print("    Sike! All variables are binary")
                     self._set_variable_domain(GRB.BINARY)
+                    callback = self._early_exit
+                    self.model.setParam("LazyConstraints", 1)
                     self.model.setParam("outputFlag", 1)
                     model_solve_time_key = "mip_runtime"
                     model_iter_key = "num_mip_iters"
                     has_valid_lp_relaxation = True
-                    valid_solution = False
+            elif self.model.status == GRB.Status.INTERRUPTED:
+                print("Interrupted")
+                break
             else:
                 # Hit a lower bound issue
                 self.handle_infeasible_model()
@@ -1001,22 +1034,32 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             remaining_time <= 0
             or n_iters >= self.solve_config.MAX_ITERATIONS
         )
+        # Default no routes
+        routes = None
         if not hit_runtime_limit:
             print(f"solved in {n_iters} iterations")
-            solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
-                (cf, self.fragment_vars_by_charge_fragment[cf].x) 
-                for cf in self.fragment_vars_by_charge_fragment 
-                if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > VAR_EPS
-            }   
-            waiting_arcs = [
-                (arc.start, arc.end, self.recharge_arc_var_by_depot_store[arc].x) 
-                for arc in self.recharge_arc_var_by_depot_store 
-                if self.recharge_arc_var_by_depot_store[arc].x > VAR_EPS
-            ]
-            routes = self.forward_label(solution_charge_fragments, waiting_arcs)
+            if self.model.Status == GRB.Status.OPTIMAL:
+                solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
+                    (cf, self.fragment_vars_by_charge_fragment[cf].x) 
+                    for cf in self.fragment_vars_by_charge_fragment 
+                    if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > VAR_EPS
+                }   
+                waiting_arcs = [
+                    (arc.start, arc.end, self.recharge_arc_var_by_depot_store[arc].x) 
+                    for arc in self.recharge_arc_var_by_depot_store 
+                    if self.recharge_arc_var_by_depot_store[arc].x > VAR_EPS
+                ]
+                routes = self.forward_label(solution_charge_fragments, waiting_arcs)
+            elif self.model.Status == GRB.Status.INTERRUPTED:
+                routes = self.mip_solution
+
             for route in routes:
                 is_valid, _ = self.validate_route(route.route_list)
+                if not is_valid:
+                    is_valid, _ = self.validate_route(route.route_list)
                 assert is_valid
+        else:
+            print("Hit runtime limit")
 
         self.statistics.update(
             {
@@ -1034,6 +1077,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 f"../images/{self.data['label']}_transformation_{self.solve_config.SECOND_OBJECTIVE.value}.html"
             )
         print(f"{self.statistics=}")
+        return routes
 
     def handle_infeasible_model(self):
         """
@@ -1233,7 +1277,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             }
         )
 
-    def run(self, output_path: str = None):
+    def run(self, output_override: str | None = None):
         """Runs an end-to-end solve ."""
         print(f"Solving {self.data['label']}...")
         print("generating fragments...")
@@ -1249,7 +1293,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.build_model()
         print("solving...")
         # with cProfile.Profile() as profile:
-        self.solve()
+        routes = self.solve()
             # profile.create_stats()
             # profile.dump_stats("solve_profile_no_all_depot_check.prof")
         # print("sequencing routes...")
@@ -1262,6 +1306,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             }
         )
         # self._calculate_upper_bound_on_network_size()
-
-        if output_path is not None:
-            self.write_statistics(file=output_path)
+        self.write_solution(routes, output_override=output_override)
+        # if output_path is not None:
+        #     self.write_statistics(file=output_path)

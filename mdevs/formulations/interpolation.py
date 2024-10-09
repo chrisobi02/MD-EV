@@ -390,6 +390,24 @@ class InterpolationIP(BaseMDEVCalculator):
             ),
             name="flow_balance"
         )
+        self.start_depot_limits = {
+            depot: self.model.addConstr(
+                quicksum(self.job_arc_variables[pair] for pair in self.pairs_by_start[depot])
+                <= depot.capacity,
+                name=f"depot_limit_{depot.id}",
+            )
+            for depot in self.depots
+            if depot.capacity != -1
+        }
+        self.end_depot_limits = {
+            depot: self.model.addConstr(
+                quicksum(self.job_arc_variables[pair] for pair in self.pairs_by_end[depot])
+                <= depot.capacity,
+                name=f"depot_limit_{depot.id}",
+            )
+            for depot in self.depots
+            if depot.capacity != -1
+        }
         
         self.job_flow_balance = {
             job: self.model.addConstr(
@@ -416,6 +434,7 @@ class InterpolationIP(BaseMDEVCalculator):
             for job in self.jobs
         }
 
+
         self.model.setObjective(
             quicksum(
                 self.job_arc_variables[pair] for depot in self.depots for pair in self.pairs_by_start[depot]
@@ -427,8 +446,11 @@ class InterpolationIP(BaseMDEVCalculator):
         self.model.setParam("TimeLimit", 300)        
         self.model.optimize()
 
+        self.statistics["runtime"] = self.model.Runtime
+        self.statistics["gap"] = self.model.MIPGap
         if self.model.Status == GRB.OPTIMAL:
             print("Optimal solution found")
+            self.statistics["objective"] = self.model.objVal
         elif self.model.Status == GRB.INFEASIBLE:
             print("Infeasible solution found")
             self.model.computeIIS()
@@ -466,15 +488,15 @@ class InterpolationIP(BaseMDEVCalculator):
                 - self.charge_matrix[seq[0].offset_id][seq[1].offset_id]
                 - seq[1].charge    
             )
-            print(charge)
+            # print(charge)
             assert isinstance(seq[0], Building) and isinstance(seq[-1], Building)
             for start, end in zip(seq[1:], seq[2:-1]): # Exclude last as it is a Building
                 # Check if can do a recharge and reach it in time
                 charge = self._calculate_end_charge_from_charge_level(start, end, charge)
-                print(
-                    charge,
-                    self.arc_charge_lower[(start, end)].x * self.location_charge_bounds[start, end].min_end_charge + self.arc_charge_upper[(start, end)].x * self.location_charge_bounds[start,end].max_end_charge
-                )
+                # print(
+                #     charge,
+                #     self.arc_charge_lower[(start, end)].x * self.location_charge_bounds[start, end].min_end_charge + self.arc_charge_upper[(start, end)].x * self.location_charge_bounds[start,end].max_end_charge
+                # )
                 
                 prev_charge = charge
                 assert charge >= 0
@@ -510,11 +532,34 @@ class InterpolationIP(BaseMDEVCalculator):
             new_route.append(route[-1])
         return new_route
                 
+    def write_solution(self, routes: list[list[Location]]) -> None:
+        solution_directory = f"{self.base_dir}/solutions/{self.TYPE}-{self.charge_calculator.CHARGE_TYPE}"
+        # if output_override is not None:
+        #     solution_directory = output_override
+        if not os.path.exists(solution_directory):
+            # If the directory doesn't exist, create it
+            os.makedirs(solution_directory) 
+        solutions = {
+            i: [f.id for f in route if isinstance(f, Job)] 
+            for i, route in enumerate(routes) 
+        } if routes is not None else {}
+        with open(f"{solution_directory}/c-{self.config.UNDISCRETISED_MAX_CHARGE}-{self.data['label']}.json", "w") as f:
+
+            json.dump(
+                {
+                    "label": self.data["label"],
+                    "solution_routes": solutions,
+                    "statistics": self.statistics,
+                    "config": asdict(self.config),
+                },
+                f,
+            )
 
     def run(self):
         self.build_model()
         self.solve()
         routes = self.sequence_routes()
         self.validate_routes(routes)
+        self.write_solution(routes)
         detoured = [self.add_detours_to_route(route) for route in routes]
         return detoured

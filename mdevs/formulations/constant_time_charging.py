@@ -459,7 +459,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         
         return violations
 
-    def run(self) -> None:
+    def run(self) -> list[Route]:
         """Runs an end-to-end solve ."""
         print(f"Solving {self.data['label']}...")
         print("generating fragments...")
@@ -471,14 +471,14 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         print("building model...")
         self.build_model()
         print("solving...")
-        prior_solution, _ = self.read_solution(instance_type="large", sheet_name="results_large_BCH")
-        frags = []
-        for route in prior_solution:
-            cfs = []
-            for f_id in self.convert_route_to_fragment_route(route):
-                cfs.append(ChargeFragment.from_fragment(self.config.MAX_CHARGE, self.fragments_by_id[f_id]))
-            frags.append(cfs)
-        self.set_solution(frags, n_vehicles=len(prior_solution))
+        # prior_solution, _ = self.read_solution(instance_type="large", sheet_name="results_large_BCH")
+        # frags = []
+        # for route in prior_solution:
+        #     cfs = []
+        #     for f_id in self.convert_route_to_fragment_route(route):
+        #         cfs.append(ChargeFragment.from_fragment(self.config.MAX_CHARGE, self.fragments_by_id[f_id]))
+        #     frags.append(cfs)
+        # self.set_solution(frags, n_vehicles=len(prior_solution))
         self.solve()
         print("sequencing routes...")
         routes = self.forward_label(
@@ -496,5 +496,5 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
 
         print("validating solution...")
         self.validate_solution([r.route_list for r in routes], self.model.objval, triangle_inequality=False)
-        self.write_statistics()
+        self.write_solution(routes)
         return routes

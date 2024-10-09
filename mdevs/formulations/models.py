@@ -15,7 +15,6 @@ VAR_EPS = 1e-3
 FORWARD_LABEL_EPS = 1e-5
 
 class Statistics(TypedDict):
-    num_fragments: int = None
     objective: int = None
     runtime: float = None
     label: str = None
@@ -29,6 +28,13 @@ class FragmentStatistics(Statistics):
     initial_timed_network_nodes: int = None
     initial_timed_network_arcs: int = None
 
+class NonLinearStatistics(FragmentStatistics):
+    inspection_time: float = None
+    num_lp_iters: int = None
+    num_mip_iters: int = None
+    mip_runtime: float = None
+    lp_runtime: float = None
+    infeasible_route_segments: int = 0
 @dataclass()
 class CalculationConfig:
     """
