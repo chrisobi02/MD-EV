@@ -481,7 +481,7 @@ class ConstantTimeFragmentGenerator(BaseFragmentGenerator):
         # self.set_solution(frags, n_vehicles=len(prior_solution))
         self.solve()
         print("sequencing routes...")
-        routes = self.forward_label(
+        routes, _ = self.forward_label(
             {
                 (cf, var.x) 
                 for cf, var in self.fragment_vars_by_charge_fragment.items() 

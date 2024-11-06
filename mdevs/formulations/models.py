@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import TypeVar, TypedDict
 from dataclasses import dataclass
+import math
 
 
 T = TypeVar("T")
@@ -11,7 +12,7 @@ class Flow(Enum):
     UNDIRECTED = "UNDIRECTED"
 
 UNREACHABLE = -1
-VAR_EPS = 1e-3
+VAR_EPS = 1e-4
 FORWARD_LABEL_EPS = 1e-5
 
 class Statistics(TypedDict):
@@ -194,7 +195,7 @@ class Label:
     end_depot: ChargeDepot | ChargeDepot
     flow: float | int
     f_id: int | None  = None# Fragment id
-    f_charge: int | None = None
+    start_charge: int | None = None
     prev_label: 'Label | None' = None
 
     def __lt__(self, other: 'Label') -> bool:
@@ -240,7 +241,7 @@ class Arc:
     start_depot: ChargeDepot | ChargeDepot 
     flow: float # Number of vehicles
     f_id: int | None = None # Fragment id
-    f_charge: int | None = None
+    start_charge: int | None = None
 
 
 @dataclass()

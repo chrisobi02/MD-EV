@@ -504,7 +504,6 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
             for depot in self.depots
             if depot.capacity != -1
         }
-
         # end same as start
         self.vehicle_conservation = self.model.addConstr(
             quicksum(self.starting_counts.values())
@@ -576,11 +575,11 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
             self,
             solution_charge_fragments: list[tuple[ChargeFragment, float]],
             waiting_arcs: list[tuple[ChargeDepot, ChargeDepot, float]]
-        ) -> list[Route]:
+        ) -> tuple[list[Route], bool]:
         """
-        Sequences the solution routes using a forward labelling procedure.
+        Sequences the solution routes using a forward labelling procedure. Second argument returns whether an FP error occurred.
         """
-
+        has_precision_error = False
         label_heap: list[Label] = [] # min heap of Labels
         routes = []
         # Get the first and last ChargeDepot for each Depot 
@@ -588,20 +587,34 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
         end_depots = {max(depot_list) for depot_list in self.charge_depots_by_depot.values()}
 
         arcs_by_charge_depot: dict[ChargeDepot, list[Arc]] = defaultdict(list[Arc])
+        # Add any start labels
+        for start_depot, end_depot, flow in waiting_arcs:
+            arcs_by_charge_depot[start_depot].append(
+                Arc(start_depot=start_depot, end_depot=end_depot, start_charge=start_depot.charge, f_id=None, flow=flow)
+            )
+            if start_depot not in start_depots:
+                continue
+
+            start_label = Label(uncompressed_end_depot=start_depot, flow=flow, end_depot=start_depot, prev_label=None, f_id=None)
+            heapq.heappush(
+                label_heap, 
+                Label(uncompressed_end_depot=start_depot, flow=flow, prev_label=start_label, end_depot=end_depot, f_id=None)
+            )
+
         for cf, flow in solution_charge_fragments:
             # Retrieve the timed depot it starts and ends at
             start_depot, end_depot = (
                 self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
             )
             arcs_by_charge_depot[start_depot].append(
-                Arc(start_depot=start_depot, end_depot=end_depot, f_id=cf.id, f_charge=cf.start_charge, flow=flow)
+                Arc(start_depot=start_depot, end_depot=end_depot, f_id=cf.id, start_charge=cf.start_charge, flow=flow)
             )
                      
             if start_depot not in start_depots:
                 continue
             # Decompress the network such that a min heap on time is real. 
             # To do this, we need to map these depots back to their true time.
-            uncompressed_end_depot = ChargeDepot(time=cf.end_time, id=cf.end_depot_id, charge=end_depot.charge) if self.TYPE == 'constant-charging' else end_depot
+            uncompressed_end_depot = ChargeDepot(time=cf.end_time, id=cf.end_depot_id, charge=end_depot.charge)# if self.TYPE == 'constant-charging' else end_depot
             
             start_label = Label(
                     flow=flow,
@@ -614,7 +627,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                     ),
                     end_depot=end_depot,
                     f_id=cf.id,
-                    f_charge=cf.start_charge,
+                    start_charge=cf.start_charge,
                     uncompressed_end_depot=uncompressed_end_depot
                 )
             heapq.heappush(
@@ -622,27 +635,17 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                 start_label 
             )
 
-        # Add any start labels
-        for start_depot, end_depot, flow in waiting_arcs:
-            arcs_by_charge_depot[start_depot].append(
-                Arc(start_depot=start_depot, end_depot=end_depot, f_id=None, flow=flow)
-            )
-            if start_depot not in start_depots:
-                continue
-
-            start_label = Label(uncompressed_end_depot=start_depot, flow=flow, end_depot=start_depot, prev_label=None, f_id=None)
-            heapq.heappush(
-                label_heap, 
-                Label(uncompressed_end_depot=start_depot, flow=flow, prev_label=start_label, end_depot=end_depot, f_id=None)
-            )
 
         while len(label_heap) != 0:
             label = heapq.heappop(label_heap)
             label_flow = label.flow
             arcs = arcs_by_charge_depot[label.end_depot]
             if len(arcs) == 0:
-                if label.end_depot not in end_depots:
-                    raise Exception("Route ends before the last depot time - very bad:(")
+                if label.end_depot not in end_depots and label_flow > FORWARD_LABEL_EPS:
+                    has_precision_error = True
+                    self.statistics["forward_label_fp_error"] = True
+                    # raise Exception(f"Route ends before the last depot time - very bad:(, flow: {label_flow}")
+
                 # assemble the route backwards
                 route = []
                 while label.prev_label is not None:
@@ -650,7 +653,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                     if label.f_id is not None:
                         route.append(
                             ChargeFragment.from_fragment(
-                                start_charge=label.f_charge, fragment=self.fragments_by_id[label.f_id]
+                                start_charge=label.start_charge, fragment=self.fragments_by_id[label.f_id]
                             )
                         )
                     label = label.prev_label
@@ -667,7 +670,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                     fragment = self.fragments_by_id[arc.f_id]
                     uncompressed_end_depot = ChargeDepot(
                         time=fragment.end_time, id=fragment.end_depot_id, charge=end_depot.charge
-                    ) if self.TYPE == 'constant-charging' else arc.end_depot
+                    ) #if self.TYPE == 'constant-charging' else arc.end_depot
                 heapq.heappush(
                     label_heap,
                     Label(
@@ -676,7 +679,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
                         prev_label=label,
                         flow=delta,
                         f_id=arc.f_id,
-                        f_charge=arc.f_charge
+                        start_charge=arc.start_charge
                     )
                 )
 
@@ -691,7 +694,7 @@ class BaseFragmentGenerator(BaseMDEVCalculator):
 
                 if label_flow < FORWARD_LABEL_EPS:
                     break
-        return routes                  
+        return routes, has_precision_error
 
     def convert_solution_to_fragments(self, instance_type:str=None, sheet_name=None, charging_style='constant-time') -> tuple[list[list[int]], list[str]]:
         """Reads the solution given by the paper into a list of their routes which has waiting arcs and fragments."""

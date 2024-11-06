@@ -123,3 +123,20 @@ class ConstantChargeFunction(ChargeCalculator):
     def charge_inverse(self, charge: int):
         """Returns the time to charge to a certain level"""
         return 0
+
+class NoChargeFunction(ChargeCalculator):
+    """
+    Implements a no-charge function. Effectively discounts charge as a constraint.
+    This is used to solve the model without considering charge constraints.
+    """
+    CHARGE_TYPE= 'none'
+    def get_charge(self, charge: int, recharge_time: int):
+        return self.config.MAX_CHARGE
+    
+    def get_charge_at_time(self, t: int) -> int:
+        """returns the charge level from 0% when charging for t units of time."""
+        return self.config.MAX_CHARGE
+    
+    def charge_inverse(self, charge: int):
+        """Returns the time to charge to a certain level"""
+        return 0

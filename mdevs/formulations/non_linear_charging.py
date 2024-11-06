@@ -10,7 +10,7 @@ from plotly.graph_objects import Figure
 import cProfile
 import bisect
 from mdevs.formulations.base import CalculationConfig
-from mdevs.utils.visualiser import visualise_charge_network, visualise_network_transformation
+from mdevs.utils.visualiser import visualise_charge_network, visualise_network_transformation, animate_network_transformation, write_network_transformation
 from mdevs.formulations.base import *
 from mdevs.formulations.charge_functions import PaperChargeFunction
 from gurobipy import Constr
@@ -78,6 +78,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.vehicle_count: int = None
         self.valid_routes: list[Route] | None = None
         self.mip_solution: list[Route] | None = None
+        self.ddd_traces: list = []
 
     def generate_timed_network(self) -> None:
         """
@@ -345,7 +346,9 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             waiting_arcs: list[tuple[FrozenChargeDepotStore, int]],
             store: ValidationStore=ValidationStore(),
         ) -> bool:
-        routes = self.forward_label(solution_charge_fragments, waiting_arcs)
+        routes, has_rounding_error = self.forward_label(solution_charge_fragments, waiting_arcs)
+        if has_rounding_error:
+            print("Rounding error found in labelling solution")
         has_violations = False
         nodes_to_update = set()
         n_added = 0
@@ -358,10 +361,10 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 is_valid, segment = self.validate_route(route_segment, start_charge=curr.charge)
                 if is_valid:
                     break
-                try:
-                    nodes_to_update.update(self.amend_violated_route(segment, store=store))       
-                except:
-                    nodes_to_update.update(self.amend_violated_route(segment, store=store))       
+                # try:
+                nodes_to_update.update(self.amend_violated_route(segment, store=store))       
+                # except:
+                #     nodes_to_update.update(self.amend_violated_route(segment, store=store))       
                 self.statistics["infeasible_route_segments"] += 1
                 has_violations = True
                 n_added += 1
@@ -380,7 +383,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             self._add_coverage_constraint(job)
         self.model.update()
         
-        return not has_violations
+        return not has_violations or has_rounding_error
 
     def _validate_charge_fragment_flow_balance(self):
         for cf in self.charge_fragments:
@@ -905,7 +908,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 for arc in waiting_sol 
                 if waiting_sol[arc] > VAR_EPS
             ]
-            routes = self.forward_label(solution_charge_fragments, waiting_arcs)
+            routes, _ = self.forward_label(solution_charge_fragments, waiting_arcs)
             is_valid = True
             for route in routes:
                 is_valid, segment = self.validate_route(route.route_list)
@@ -914,9 +917,19 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
 
             if is_valid:
                 print("\n\nSolution found in branch and bound!\n\n")
-                self.mip_solution = routes
+                # self.mip_solution = routes
                 model.terminate()
                 return
+        # if where == GRB.Callback.MIP:
+        #     lower = self.model.cbGet(GRB.Callback.MIP_OBJBST)
+        #     upper = self.model.cbGet(GRB.Callback.MIP_OBJBND)
+        #     gap = abs((upper - lower)/lower)
+        #     if gap < 0.05:
+        #         print("\n\n Gap isless than 5%, proceeding to DDD...\n\n")
+        #         # self.mip_solution = routes
+        #         model.terminate()
+        #         return
+
 
     def solve(self):
         print("setting solve...")
@@ -958,13 +971,13 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.vehicle_count = self.model.objval
         print(f"Initial solve took {self.model.Runtime}, {self.vehicle_count=}")#, paper: {self._get_paper_objective_value()}")
         self.obj_constr = self.model.addConstr(quicksum(self.starting_counts.values()) == self.vehicle_count, name="objective_limit")
-        self._set_secondary_objective()
         callback = None
         while (
             not valid_solution 
             and n_iters < self.solve_config.MAX_ITERATIONS 
             and 0 < remaining_time
         ):
+            self._set_secondary_objective()
             n_iters += 1
             self.statistics[model_iter_key] += 1
             print(f"Starting iteration {n_iters}")            
@@ -976,7 +989,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             self.statistics[model_solve_time_key] += self.model.Runtime
             remaining_time -= self.model.Runtime
 
-            if self.model.status == GRB.Status.OPTIMAL:
+            if self.model.status == GRB.Status.OPTIMAL or self.model.status == GRB.Status.INTERRUPTED:
                 solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
                     (cf, self.fragment_vars_by_charge_fragment[cf].x) 
                     for cf in self.fragment_vars_by_charge_fragment 
@@ -992,7 +1005,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                     if self.recharge_arc_var_by_depot_store[arc].x > VAR_EPS
                 ]
                 if use_visualisation:
-                    fig = self.add_solution_trace(fig=fig)
+                    fig = self.add_solution_trace(itern=n_iters)
                 network_additions = ValidationStore()
                 print("    Inspecting solution...")
                 time0 = timer.time()
@@ -1001,31 +1014,22 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 )
                 inspection_time = timer.time() - time0
                 if use_visualisation:
-                    self.add_inspection_trace(fig, network_additions)
+                    self.add_inspection_trace(n_iters, network_additions)
                 self.statistics["inspection_time"] += inspection_time
-                remaining_time -= self.model.Runtime
+                remaining_time -= inspection_time
                 if valid_solution and not has_valid_lp_relaxation:
                     valid_solution = False
                     print("    Valid linear relaxation, changing to integer variables...")
-                    # Check all variables are 1 or 0 just for fun???
-                    if (
-                        all(
-                            abs(var.x - 1) < VAR_EPS or abs(var.x) < VAR_EPS
-                            for var in self.model.getVars()
-                        )
-                    ):
-                        valid_solution = True
-                        print("    Sike! All variables are binary")
                     self._set_variable_domain(GRB.BINARY)
                     callback = self._early_exit
-                    self.model.setParam("LazyConstraints", 1)
+                    # self.model.setParam("LazyConstraints", 1)
                     self.model.setParam("outputFlag", 1)
                     model_solve_time_key = "mip_runtime"
                     model_iter_key = "num_mip_iters"
                     has_valid_lp_relaxation = True
-            elif self.model.status == GRB.Status.INTERRUPTED:
-                print("Interrupted")
-                break
+            # elif self.model.status == GRB.Status.INTERRUPTED:
+            #     print("Interrupted")
+            #     break
             else:
                 # Hit a lower bound issue
                 self.handle_infeasible_model()
@@ -1038,7 +1042,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         routes = None
         if not hit_runtime_limit:
             print(f"solved in {n_iters} iterations")
-            if self.model.Status == GRB.Status.OPTIMAL:
+            if self.model.Status == GRB.Status.OPTIMAL or self.model.Status == GRB.Status.INTERRUPTED:
                 solution_charge_fragments: set[tuple[ChargeFragment, int]] = {
                     (cf, self.fragment_vars_by_charge_fragment[cf].x) 
                     for cf in self.fragment_vars_by_charge_fragment 
@@ -1049,9 +1053,9 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                     for arc in self.recharge_arc_var_by_depot_store 
                     if self.recharge_arc_var_by_depot_store[arc].x > VAR_EPS
                 ]
-                routes = self.forward_label(solution_charge_fragments, waiting_arcs)
-            elif self.model.Status == GRB.Status.INTERRUPTED:
-                routes = self.mip_solution
+                routes, _ = self.forward_label(solution_charge_fragments, waiting_arcs)
+            # elif self.model.Status == GRB.Status.INTERRUPTED:
+            #     routes = self.mip_solution
 
             for route in routes:
                 is_valid, _ = self.validate_route(route.route_list)
@@ -1072,10 +1076,19 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
             }
         )
         if use_visualisation:
-            visualise_network_transformation(fig)
-            fig.write_html(
-                f"../images/{self.data['label']}_transformation_{self.solve_config.SECOND_OBJECTIVE.value}.html"
+            # visualise_network_transformation(fig)
+            # fig = animate_network_transformation(
+            #     self.ddd_traces, [0, int(self.config.MAX_CHARGE * 1.2)], self.statistics['num_lp_iters']
+            # )
+            path = f"../images/{self.data['label']}_transformation_{self.solve_config.SECOND_OBJECTIVE.value}/"
+            if not os.path.exists(path):
+                os.makedirs(path)
+            write_network_transformation(
+                self.ddd_traces, [0, int(self.config.MAX_CHARGE * 1.2)], self.statistics['num_lp_iters'], path
             )
+            # fig.write_html(
+            #     f"../images/{self.data['label']}_transformation_{self.solve_config.SECOND_OBJECTIVE.value}.html"
+            # )
         print(f"{self.statistics=}")
         return routes
 
@@ -1095,13 +1108,13 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         self.vehicle_count += 1            
         self.obj_constr.RHS = self.vehicle_count
 
-    def add_solution_trace(self, fig: Figure | None=None):
-        if fig is None:
-            fig = Figure()
+    def add_solution_trace(self, itern: int):
+        # if fig is None:
+            # fig = Figure()
         solution_charge_fragments = [
             cf for cf in self.fragment_vars_by_charge_fragment if getattr(self.fragment_vars_by_charge_fragment[cf], 'x', -1) > VAR_EPS
         ]
-        visualise_charge_network(
+        frame = visualise_charge_network(
                     self.charge_depots,
                     [
                         (
@@ -1110,24 +1123,57 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                         for cf in solution_charge_fragments
                     ], 
                     [arc for arc in self.recharge_arc_var_by_depot_store if getattr(self.recharge_arc_var_by_depot_store[arc], "x", -1) > VAR_EPS],
-                   fig=fig,
-                   graph_type="Solution"
+                   iter=itern,
+                   graph_type="Solution",
+                   max_charge=self.config.MAX_CHARGE,
+                   showlegend=False,
+                   iter_code=f"Iteration {itern} - {'LP' if self.statistics['num_mip_iters'] == 0 else 'MIP'} - |A| = {len(self.charge_fragments) + len(self.recharge_arcs)} - |N| = {len(self.charge_depots)}",
                 )
-        return fig
+        self.ddd_traces.append(frame)
 
-    def add_inspection_trace(self, fig: Figure, network_additions: ValidationStore):
-        visualise_charge_network(
-                    network_additions.depots_to_update,
-                    [
-                        (
-                          self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
-                        )
-                        for cf in network_additions.new_fragment_arcs
-                    ], 
-                    network_additions.new_recharge_arcs.intersection(self.recharge_arcs),
-                    fig=fig,
-                    graph_type="Repair"
+    def add_inspection_trace(self, itern: int, network_additions: ValidationStore):
+        if (
+            len(network_additions.new_fragment_arcs) == 0
+            and len(network_additions.new_recharge_arcs) == 0
+            and len(network_additions.depots_to_update) == 0
+        ):
+            foo_depot = ChargeDepot(id=0, time=0, charge=2000)
+            new_charge_fragments = [(foo_depot, foo_depot)]
+            new_depots = {foo_depot}
+            new_recharge_arcs = {FrozenChargeDepotStore(start=foo_depot, end=foo_depot)}
+        else:
+            new_charge_fragments = [
+                (
+                    self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
                 )
+                for cf in network_additions.new_fragment_arcs
+            ]
+            new_recharge_arcs = network_additions.new_recharge_arcs.intersection(self.recharge_arcs)
+            new_depots = network_additions.depots_to_update
+    
+        frame = visualise_charge_network(
+            new_depots,
+            new_charge_fragments, 
+            new_recharge_arcs,
+            iter=itern,
+            graph_type="Repair",
+            max_charge=self.config.MAX_CHARGE,
+            showlegend=False
+        )
+        self.ddd_traces[-1].data += frame.data
+        # trace = visualise_charge_network(
+        #             network_additions.depots_to_update,
+        #             [
+        #                 (
+        #                   self.charge_depots_by_charge_fragment[cf].start, self.charge_depots_by_charge_fragment[cf].end
+        #                 )
+        #                 for cf in network_additions.new_fragment_arcs
+        #             ], 
+        #             network_additions.new_recharge_arcs.intersection(self.recharge_arcs),
+        #             fig=fig,
+        #             graph_type="Repair"
+        #         )
+        # self.ddd_traces.append(frame)
 
     def _add_initial_network_cuts(self):
         """Adds additional nodes prior to optimisation."""
@@ -1296,8 +1342,6 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
         routes = self.solve()
             # profile.create_stats()
             # profile.dump_stats("solve_profile_no_all_depot_check.prof")
-        # print("sequencing routes...")
-        # routes = self.create_routes()
         # Final network size
         self.statistics.update(
             {
@@ -1305,6 +1349,7 @@ class NonLinearFragmentGenerator(BaseFragmentGenerator):
                 "final_charge_network_nodes": len(self.charge_depots)
             }
         )
+        # routes = []
         # self._calculate_upper_bound_on_network_size()
         self.write_solution(routes, output_override=output_override)
         # if output_path is not None:
