@@ -5,6 +5,7 @@ import pandas as pd
 import glob
 import click
 from mdevs.formulations import *
+from mdevs.formulations.charge_functions import ConstantChargeFunction, NoChargeFunction
 import cProfile
 
 NON_LINEAR_BASIC_CONFIG = CalculationConfig(
@@ -16,68 +17,17 @@ CONSTANT_TIME_BASIC_CONFIG = CalculationConfig(
     UNDISCRETISED_MAX_CHARGE=100,
 )
 
+DIRECTORIES = [
+    # "data/instances_regular/",
+    # "data/instances_constrained/",
+    "data/instances_num_of_depots_experim",
+    # "data/instances_large/",
+]
 
 @click.group()
 def cli():
     pass
 
-def compare_sequencing_procedures():
-    """Compare recursive and forward labelling algorithms for route construction."""
-    directories= ["data/instances_large/", "data/instances_regular/"] 
-    sequence_data = []
-    fails = []
-    for directory in directories:
-        # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
-        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
-        # EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
-        # Iterate over the list of filepaths & open each file
-        for json_file in json_files:     
-            if "fragments" in str(json_file) or "4000" not in json_file:
-                continue
-            # if any(ex in str(json_file) for ex in EXCLUDED_INSTANCES):
-            # if "I-3-3-100-08.json" not in str(json_file):
-            # if "50" not in str(json_file):
-            # if "I-5-5-200-07.json" not in str(json_file):
-            # if "I-3-3-100-08" not in str(json_file):
-            # if "I-3-3-100-08" not in str(json_file):
-            #     continue
-            # # if "50" not in str(json_file):
-                # continue
-            print(f"Solving {json_file}...")
-            print("generating fragments...")
-            # remove the last /, append fragments and then the part on the other side f the slice
-
-            frag_file = json_file.split("/")
-            # prev_runs = pd.read_csv("large_results.csv")
-            # if frag_file[-1].split(".")[0] in prev_runs[prev_runs["method"] == "fragments"]["label"].values:
-            #     continue
-            # json_file = r"data/instances_regular/I-1-1-50-04.json"
-            str_frag_file = "/".join(frag_file[:-1]) + "/fragments/" + "f-" + frag_file[-1]
-            # generator.generate_fragments()#file=str_frag_file)
-            
-            params = {"UNDISCRETISED_MAX_CHARGE": 100}
-            try:
-                generator = ConstantTimeFragmentGenerator(json_file)
-                # ip = NaiveIP(json_file, params=params)
-                generator.run()#file=str_frag_file)
-                result = {"Jobs": len(generator.jobs), "Depots": len(generator.depots)}
-                time0 = time.time()
-                routes = generator.create_routes()
-                result["Recursion"] = time.time() - time0
-                generator.validate_solution(routes, generator.model.objval, triangle_inequality=False)
-                            
-                time0 = time.time()
-                routes = generator.forward_label()
-                result["Forward Labelling"] = time.time() - time0
-                generator.validate_solution([r.route_list for r in routes], generator.model.objval, triangle_inequality=False)
-                sequence_data.append(result)
-            except Exception as e:
-                fails.append((json_file, e))
-    pd.DataFrame(sequence_data).to_csv("data/results/sequencing_algorithm_results.csv")
-    print("Failed instances:", fails)
-    for f in fails:
-        print(f[0])
-        print(f[1])
 
 def constant_time_debug():
     # Specify the directory you want to search
@@ -171,7 +121,7 @@ def interpolation_debug():
             json_file, 
             config=NON_LINEAR_BASIC_CONFIG,
             solve_config=SolveConfig(
-                SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
+                SECOND_OBJECTIVE=Objective.MIN_DEADHEADING,
                 INCLUDE_VISUALISATION=False,
             )
         )
@@ -192,20 +142,6 @@ def interpolation_debug():
             if not is_valid:
                 print(f"Invalid route: {segment}")
                 raise ValueError("Invalid route")
-
-        # # all_prior_fragments = set(f for s in prior_solution for f in s)
-        # # # get fragments associated with a timed depot
-        # data = pd.read_excel("mdevs/data/mdevs_solutions.xlsx", sheet_name=None)
-        # instance_type = "regular_BCH" if "000" not in model.data["label"] else 'large' 
-        # for sheet in data:
-        #     if instance_type in sheet:
-        #         data = data[sheet]
-        #         break
-        # obj = data.query(
-        #     f"ID_instance == {model.data['ID']} and battery_charging == 'constant-time'"
-        # )["objective_value"].values[0]
-
-        # assert model.model.objval == obj
     
 @cli.command()
 def non_linear_debug():   
@@ -213,6 +149,7 @@ def non_linear_debug():
       # Specify the directory you want to search
     directory = "mdevs/data/instances_large/"
     directory = "mdevs/data/instances_regular/"
+    directory = "data/instances_num_of_depots_experim/"
 
     # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
     json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True) 
@@ -220,10 +157,10 @@ def non_linear_debug():
     click.echo(json_files)
     # Iterate over the list of filepaths & open each file
     for json_file in json_files:     
-        if "fragments" in str(json_file):
+        if any([s in str(json_file) for s in ["fragments", 'solutions']]):
             continue
         # if "200-01" not in str(json_file):
-        if "200-0" not in str(json_file):
+        if "1-1-200-01" not in str(json_file):
             continue
         print(f"Solving {json_file}...")
         # model = ConstantTimeFragmentGenerator(
@@ -231,69 +168,147 @@ def non_linear_debug():
         #     config=CONSTANT_TIME_BASIC_CONFIG,
         # )
         # model.generate_fragments()
-
-        model = NonLinearFragmentGenerator(
-            json_file, 
-            config=NON_LINEAR_BASIC_CONFIG,
-            solve_config=SolveConfig(
-                SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
-                INCLUDE_VISUALISATION=False,
+        for obj in [
+            Objective.MIN_CHARGE,
+            Objective.MIN_VEHICLES,
+            # Objective.MIN_DEADHEADING,
+        ]:
+            model = NonLinearFragmentGenerator(
+                json_file, 
+                config=NON_LINEAR_BASIC_CONFIG,
+                solve_config=SolveConfig(
+                    SECOND_OBJECTIVE=obj,
+                    INCLUDE_VISUALISATION=True,
+                )
             )
-        )
-        # # all_prior_fragments = set(f for s in prior_solution for f in s)
-        # # get fragments associated with a timed depot
-        routes = model.run()
+            # # all_prior_fragments = set(f for s in prior_solution for f in s)
+            # # get fragments associated with a timed depot
+            routes = model.run()
         # with cProfile.Profile() as profile:
         #     profile.create_stats()
         #     profile.dump_stats("constant_run_profile.prof")
-        data = pd.read_excel("mdevs/data/mdevs_solutions.xlsx", sheet_name=None)
+        # data = pd.read_excel("mdevs/data/mdevs_solutions.xlsx", sheet_name=None)
         # instance_type = "large_BCH"# if "000" not in model.data["label"] else 'large_BCH' 
-        # instance_type = "regular_BCH" if "000" not in model.data["label"] else 'large_BCH' 
-        # for sheet in data:
-        #     if instance_type in sheet:
-        #         data = data[sheet]
-        #         break
-        # obj = data.query(
-        #     f"ID_instance == {model.data['ID']} and battery_charging == 'non-linear'"
-        # )["objective_value"].values[0]
-
-        # assert model.model.objval == len(routes) == obj
 
 @cli.command()
-@click.argument("output_path", type=str)
+# @click.argument("output_path", type=str)
 @click.option("--size", type=str, default="50") 
 @click.option("--exclude", type=str, default=None)
-def run_instances(output_path: str, size: str, exclude: str):
-    directories = ["data/instances_regular/", "data/instances_large/"]
-    for directory in directories:
+def run_instances(size: str, exclude: str):
+    # for directory in ["data/instances_large/"]:
+    for directory in DIRECTORIES:
         # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
         json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True) 
-        EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
         click.echo(json_files)
         # Iterate over the list of filepaths & open each file
         for json_file in json_files:     
-            if "fragments" in str(json_file):
-                continue
+            if any([s in str(json_file) for s in ["fragments", 'solutions', 'BENCHMARK']]):
+                continue        
             if exclude is not None and exclude in str(json_file):
                 continue
             if size not in str(json_file):
                 continue
+            # if '00-04' not in str(json_file):
+            #     continue
             print(f"Solving {json_file}...")
             model = NonLinearFragmentGenerator(
                 json_file,
                 config=NON_LINEAR_BASIC_CONFIG,
                 solve_config=SolveConfig(
-                    SECOND_OBJECTIVE=SecondObjectives.MIN_DEADHEADING,
-                    TIME_LIMIT=600,
+                    SECOND_OBJECTIVE=Objective.MIN_DEADHEADING,
+                    TIME_LIMIT=7200,
+                    # TIME_LIMIT=7200 * 12,
                     # MAX_ITERATIONS=5
                 )
             )
+            sol_file_str =  (
+                f"{model.base_dir}/solutions/{model.TYPE}/c-{model.config.UNDISCRETISED_MAX_CHARGE}-{model.data['label']}.json"
+            )
+            # if os.path.exists(sol_file_str):
+            #     print(f"Skipping {model.data['label']}")
+            #     continue
+            model.run()
+
+@cli.command()
+@click.option("--exclude", type=str, default=None)
+def run_charge_constrained_instances(exclude: str):
+    for directory in ["data/instances_regular/"]:
+        # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
+        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
+        # click.echo(json_files)
+        # Iterate over the list of filepaths & open each file
+        for json_file in json_files:     
+            if any([s in str(json_file) for s in ["fragments", 'solutions']]):
+                continue        
+            if exclude is not None and exclude in str(json_file):
+                continue
+            if "100" not in str(json_file):
+                continue
+            print(f"Solving {json_file}...")
+            for charge_max in range(70, 131, 10):
+                # model = NonLinearFragmentGenerator(
+                #     json_file,
+                #     config=CalculationConfig(
+                #         UNDISCRETISED_MAX_CHARGE=charge_max,
+                #         RECHARGE_DELAY_IN_MINUTES=0.5,        
+                #     ),
+                #     solve_config=SolveConfig(
+                #         SECOND_OBJECTIVE=Objective.MIN_DEADHEADING,
+                #         TIME_LIMIT=3600,
+                #         # MAX_ITERATIONS=5
+                #     )
+                # )
+                # model.run()
+
+                # Constant time test for interpolation
+                model = InterpolationIP(
+                    json_file,
+                    charge_calculator_class=ConstantChargeFunction,
+                    charge_calculator_kwargs={"discretise": False},
+                    config=CONSTANT_TIME_BASIC_CONFIG,
+                )
+                model.run()
+
+@cli.command()
+def run_objective_test():
+    # for directory in ["data/instances_regular/"]:
+    for directory in ["data/instances_regular/"]:
+        # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
+        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
+        # click.echo(json_files)
+        # Iterate over the list of filepaths & open each file
+        for json_file in json_files:     
+            if any([s in str(json_file) for s in ["fragments", 'solutions']]):
+                continue        
+            # if any([s in str(json_file) for s in ["fragments", 'solutions', "05", '09', '10', '06', '07', '03']]):
+            #     continue        
+            if "200-" not in str(json_file):
+                continue
+            print(f"Solving {json_file}...")
+            for obj in [
+                # Objective.MIN_DEADHEADING,
+                # Objective.MIN_CHARGE,
+                Objective.MIN_VEHICLES,
+            ]:
+                model = NonLinearFragmentGenerator(
+                    json_file,
+                    config=NON_LINEAR_BASIC_CONFIG,
+                    solve_config=SolveConfig(
+                        SECOND_OBJECTIVE=obj,
+                        TIME_LIMIT=3600,
+                        # MAX_ITERATIONS=5
+                    )
+                )
+                file_str = f"data/instances_regular/solutions/objective_test/{obj.value}/c-{model.config.UNDISCRETISED_MAX_CHARGE}-{model.data['label']}.json"
+                # if os.path.exists(file_str):
+                #     print(f"Skipping {model.data['label']}")
+                #     continue
+                model.run(output_override=file_str)
+
             # data = pd.read_csv(output_path)
             # if model.data["label"] in data["label"].values:
             #     print(f"Skipping {model.data['label']}")
             #     continue
-            model.run(output_path=output_path)
-
             # data = pd.read_excel("data/mdevs_solutions.xlsx", sheet_name=None)
             # instance_type = "regular" if "000" not in model.data["label"] else 'large' 
             # for sheet in data:
@@ -354,84 +369,140 @@ def constant_time_single(size: str):
 def constant_time_run():
     directory = "mdevs/data/instances_large/"
     directory = "mdevs/data/instances_regular/"
-    for directory in ["data/instances_regular/", "data/instances_large/"]:
+    # for directory in ["data/instances_regular/", "data/instances_large/"]:
+    for directory in DIRECTORIES:
+    # [
+    #     "data/instances_constrained/",
+    #     "data/instances_num_of_depots_experim",
+    #     ]:
         # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
         json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
         EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
         # Iterate over the list of filepaths & open each file
         for json_file in json_files:     
-            if "fragments" in str(json_file):
+            if any([s in str(json_file) for s in ["fragments", 'solutions']]):
                 continue        
             print(json_file)
             generator = ConstantTimeFragmentGenerator(json_file)
-            generator.generate_fragments()#file=str_frag_file)
-            generator.generate_timed_network()
-            generator.validate_timed_network()
-            print("building model...")
-            generator.model.setParam("OutputFlag", 0)
-            generator.build_model()
-            print("solving...")
-            generator.solve()
-            print("sequencing routes...")
             routes = generator.run()
-            print(f"Fragment routes: {len(routes)}")
-            generator.validate_solution([r.route_list for r in routes], generator.model.objval)
-            
-            data = pd.read_excel("data/mdevs_solutions.xlsx", sheet_name=None)
-            instance_type = "regular" if "000" not in generator.data["label"] else 'large' 
-            for sheet in data:
-                if instance_type in sheet:
-                    data = data[sheet]
-                    break
-            obj = data.query(
-                f"ID_instance == {generator.data['ID']} and battery_charging == 'constant-time'"
-            )["objective_value"].values[0]
-
-            assert generator.model.objval == obj
-
-            result_json = {
-                "label": json_file.split("/")[-1].split(".")[0],
-                "method": "constant_time",
-            } | generator.statistics
-            json.dump(result_json, open(f"data/results/constant_run/{generator.data['label']}.json", "w"))
-
+            # print(f"Fragment routes: {len(routes)}")
+            # generator.validate_solution([r.route_list for r in routes], generator.model.objval)
 @cli.command()
-def constant_time_naive_ip_run():
+def constant_time_battery_constrained_run():
     directory = "mdevs/data/instances_large/"
     directory = "mdevs/data/instances_regular/"
-    for directory in ["data/instances_regular/"]:
     # for directory in ["data/instances_regular/", "data/instances_large/"]:
+    for directory in [
+        # "data/instances_constrained/",
+        'data/instances_regular/',
+        ]:
         # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
         json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
         EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
         # Iterate over the list of filepaths & open each file
         for json_file in json_files:     
-            if "fragments" in str(json_file):
-                continue
-            generator = NaiveIP(json_file)
-            # generator.model.setParam("OutputFlag", 0)\
-            print(f"solving {json_file}")
-            generator.run()
-            print("sequencing routes...")
-            routes = generator.sequence_routes()
-            print(f"Fragment routes: {len(routes)}")
+            if any([s in str(json_file) for s in ["fragments", 'solutions']]):
+                continue        
+            for json_file in json_files:     
+                if any([s in str(json_file) for s in ["fragments", 'solutions']]):
+                    continue        
+                if "100" not in str(json_file):
+                    continue
+                print(f"Solving {json_file}...")
+                for charge_max in range(70, 131, 10):
+                    model = ConstantTimeFragmentGenerator(
+                        json_file,
+                        config=CalculationConfig(
+                            UNDISCRETISED_MAX_CHARGE=charge_max,
+                            RECHARGE_DELAY_IN_MINUTES=0.5,        
+                        )
+                    )
+                    model.run()
+            # print(f"Fragment routes: {len(routes)}")
             # generator.validate_solution([r.route_list for r in routes], generator.model.objval)
-            result_json = {
-                "label": json_file.split("/")[-1].split(".")[0],
-                "method": "constant_time",
-            } | generator.statistics
-            json.dump(result_json, open(f"data/results/naive_ip_constant_run/{generator.data['label']}.json", "w"))
-            
+
+@cli.command()
+def constant_time_interpolation_run():
+    directory = "mdevs/data/instances_large/"
+    directory = "mdevs/data/instances_regular/"
+    # for directory in [
+    # "data/instances_regular/", "data/instances_large/"]:
+    for directory in [
+        # "data/instances_regular/",
+        # "data/instances_constrained/",
+        # "data/instances_num_of_depots_experim",
+        "data/instances_large/",
+        ]:
+        # Use glob to match the pattern '**/*.json', which will find .json files in the specified directory and all its subdirectories
+        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
+        EXCLUDED_INSTANCES = ["instances_regular/I-5-5-200-06.json", "I-5-5-200-10.json"]
+        # Iterate over the list of filepaths & open each file
+        for json_file in json_files:     
+            if any([s in str(json_file) for s in [
+                "fragments", 'solutions',
+                '3000', '4000'
+                ]]):
+                continue        
+            print(json_file)
+            sol_file_str =  (
+                f"{directory}solutions/interpolation-constant/c-{CONSTANT_TIME_BASIC_CONFIG.UNDISCRETISED_MAX_CHARGE}-{json_file.split('/')[-1]}"
+            )
+            print(sol_file_str)
+            if os.path.exists(sol_file_str):
+                print(f"Skipping")
+                continue
+            model = InterpolationIP(
+                json_file,
+                charge_calculator_class=ConstantChargeFunction,
+                charge_calculator_kwargs={"discretise": False},
+                config=CONSTANT_TIME_BASIC_CONFIG
+            )
+            routes = model.run()
+            # print(f"Fragment routes: {len(routes)}")
+            # generator.validate_solution([r.route_list for r in routes], generator.model.objval)
+
+@cli.command()
+def solve_models_without_charge():
+    """Solves each model without considering charge constraints"""
+    for directory in DIRECTORIES:
+        json_files = glob.glob(os.path.join(directory, '**', '*.json'), recursive=True)
+        # Iterate over the list of filepaths & open each file
+        for json_file in json_files:
+            if any([s in str(json_file) for s in ["fragments", 'solutions']]):
+                continue        
+            print(json_file)
+            if "2000-04" not in json_file:
+                continue
+            generator = NoChargeIP(
+                json_file,
+                charge_calculator_class=NoChargeFunction,
+                charge_calculator_kwargs={"discretise": False},
+                config=NON_LINEAR_BASIC_CONFIG
+            )
+            routes = generator.run()
+                # print(f"Fragment routes: {len(routes)}")
+                # generator.validate_solution([r.route_list for r in routes], generator.model.objval)
+
+            # print(f"Fragment routes: {len(routes)}")
+            # generator.validate_solution([r.route_list for r in routes], generator.model.objval)
+
+
 cli.add_command(constant_time_single)
 cli.add_command(constant_time_run)
 cli.add_command(non_linear_debug)
-cli.add_command(constant_time_naive_ip_run)
+cli.add_command(run_charge_constrained_instances)
+# cli.add_command(constant_time_naive_ip_run)
+cli.add_command(run_objective_test)
+cli.add_command(non_linear_debug)
+cli.add_command(solve_models_without_charge)
 
 
 if __name__ == "__main__":
     # constant_time_single("50")
-    non_linear_debug()
+    # non_linear_debug()
     # interpolation_debug()
+    # run_objective_test()
+    # run_charge_constrained_instances()
     cli()
     # run_non_linear_regular_instances("data/results/non_linear_run/s.csv", "1000", None)
     # constant_time_debug()

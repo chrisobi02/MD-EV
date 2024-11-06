@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import TypeVar, TypedDict
 from dataclasses import dataclass
+import math
 
 
 T = TypeVar("T")
@@ -11,11 +12,10 @@ class Flow(Enum):
     UNDIRECTED = "UNDIRECTED"
 
 UNREACHABLE = -1
-VAR_EPS = 1e-3
+VAR_EPS = 1e-4
 FORWARD_LABEL_EPS = 1e-5
 
 class Statistics(TypedDict):
-    num_fragments: int = None
     objective: int = None
     runtime: float = None
     label: str = None
@@ -29,6 +29,13 @@ class FragmentStatistics(Statistics):
     initial_timed_network_nodes: int = None
     initial_timed_network_arcs: int = None
 
+class NonLinearStatistics(FragmentStatistics):
+    inspection_time: float = None
+    num_lp_iters: int = None
+    num_mip_iters: int = None
+    mip_runtime: float = None
+    lp_runtime: float = None
+    infeasible_route_segments: int = 0
 @dataclass()
 class CalculationConfig:
     """
@@ -188,7 +195,7 @@ class Label:
     end_depot: ChargeDepot | ChargeDepot
     flow: float | int
     f_id: int | None  = None# Fragment id
-    f_charge: int | None = None
+    start_charge: int | None = None
     prev_label: 'Label | None' = None
 
     def __lt__(self, other: 'Label') -> bool:
@@ -234,7 +241,7 @@ class Arc:
     start_depot: ChargeDepot | ChargeDepot 
     flow: float # Number of vehicles
     f_id: int | None = None # Fragment id
-    f_charge: int | None = None
+    start_charge: int | None = None
 
 
 @dataclass()
